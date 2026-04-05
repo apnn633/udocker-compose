@@ -8,6 +8,15 @@ udocker lets unprivileged users run Docker containers without Docker installed. 
 
 **udocker-compose** adds compose-style orchestration so you can use existing `docker-compose.yml` files with udocker directly.
 
+<details>
+<summary>中文</summary>
+
+udocker 允许非特权用户在没有 Docker 的情况下运行容器。但它没有 `docker-compose` —— 你需要手动管理每个容器、重写服务主机名、手动串联所有配置。
+
+**udocker-compose** 为 udocker 添加了编排功能，让你可以直接使用现有的 `docker-compose.yml` 文件。
+
+</details>
+
 ## Features
 
 - Parses `docker-compose.yml` (v2/v3 format) — use your existing compose files as-is
@@ -20,6 +29,22 @@ udocker lets unprivileged users run Docker containers without Docker installed. 
 - Single-file, zero-dependency (only requires Python 3 + PyYAML)
 
 > **Note:** udocker runs all containers directly on the host network — there is **no network isolation** between containers. The `/etc/hosts` injection is purely a convenience feature that maps service names (like `postgres`, `redis`) to `127.0.0.1`, so your compose files work without modification. It does not provide any form of network isolation or virtual networking.
+
+<details>
+<summary>中文</summary>
+
+- 解析 `docker-compose.yml`（v2/v3 格式）—— 直接使用现有的 compose 文件
+- 基于拓扑排序的依赖解析（`depends_on`）
+- 通过 `/etc/hosts` 注入实现服务名解析 —— 无需把连接串中的 `postgres` 改为 `127.0.0.1`
+- 命名卷管理（映射为本地目录）
+- 后台/前台运行与日志管理
+- 自动重启监控（`restart: always/unless-stopped`）
+- 健康检查
+- 单文件，仅依赖 Python 3 + PyYAML
+
+> **注意：** udocker 的所有容器直接运行在宿主机网络上，**没有任何网络隔离**。`/etc/hosts` 注入只是一个便利功能，将服务名（如 `postgres`、`redis`）映射到 `127.0.0.1`，让你的 compose 文件无需修改即可使用。它不提供任何形式的网络隔离或虚拟网络。
+
+</details>
 
 ## Quick Start
 
@@ -68,6 +93,25 @@ udocker-compose down -v        # Also remove named volumes
 | `run [--rm] <service> <cmd>` | Run a one-off command |
 | `config` | Validate and display parsed configuration |
 
+<details>
+<summary>中文</summary>
+
+| 命令 | 说明 |
+|------|------|
+| `up [-d] [service...]` | 创建并启动服务，`-d` 后台运行 |
+| `down [-v]` | 停止并删除容器，`-v` 同时删除卷 |
+| `ps [service...]` | 列出服务状态 |
+| `pull [service...]` | 拉取镜像 |
+| `logs [-f] [-n N] [service...]` | 查看日志，`-f` 实时跟踪 |
+| `restart [service...]` | 重启服务 |
+| `stop [service...]` | 停止服务（保留容器） |
+| `start [service...]` | 启动已停止的服务 |
+| `exec <service> <cmd>` | 在容器中执行命令 |
+| `run [--rm] <service> <cmd>` | 运行一次性命令 |
+| `config` | 显示解析后的配置 |
+
+</details>
+
 ## Service Name Resolution
 
 In Docker Compose, containers on the same network can reach each other by service name (e.g., `postgres:5432`). This works because Docker creates virtual networks with built-in DNS.
@@ -91,6 +135,27 @@ So `postgresql://user:pass@postgres:5432/db` just works — `postgres` resolves 
 - No virtual networks or bridge interfaces
 - Two services cannot bind the same port (they share the host's port space)
 - Ports below 1024 still require root
+
+<details>
+<summary>中文</summary>
+
+在 Docker Compose 中，同一网络下的容器可以通过服务名互相访问（如 `postgres:5432`），因为 Docker 创建了带有内置 DNS 的虚拟网络。
+
+udocker **没有网络隔离** —— 所有容器直接运行在宿主机网络栈上，共享端口和 IP。没有虚拟网络，没有容器独立 IP，没有 DNS。
+
+为了让你**不用修改连接串**就能使用现有的 `docker-compose.yml`，udocker-compose 会注入一个 `/etc/hosts` 文件到每个容器中，将所有服务名映射到 `127.0.0.1`。
+
+所以 `postgresql://user:pass@postgres:5432/db` 直接就能用 —— `postgres` 解析为 `127.0.0.1`，而 postgres 进程确实在那个地址监听。**这不是网络功能，只是主机名别名的便利映射。**
+
+### 不提供的功能
+
+- 无网络隔离 —— 所有服务对宿主机和彼此都可见
+- 无容器独立 IP
+- 无虚拟网络或桥接接口
+- 两个服务不能绑定同一端口（共享宿主机端口空间）
+- 1024 以下端口仍需 root
+
+</details>
 
 ## Example: Multi-Service Application
 
@@ -172,6 +237,29 @@ udocker supports multiple execution backends. Choose based on your environment:
 UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 ```
 
+<details>
+<summary>中文 - 配置说明</summary>
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `UDOCKER_COMPOSE_UDOCKER` | `udocker` | udocker 可执行文件路径 |
+| `UDOCKER_COMPOSE_EXECMODE` | `P1` | 执行模式 |
+| `UDOCKER_COMPOSE_DEBUG` | 未设置 | 设为 `1` 启用调试输出 |
+
+### 执行模式
+
+| 模式 | 引擎 | 性能 | 适用场景 |
+|------|------|------|----------|
+| **P1**（默认） | PRoot + seccomp | 中 | 通用，Termux/Android |
+| **P2** | PRoot 无加速 | 低 | P1 不可用时的后备 |
+| **F1-F4** | Fakechroot | 高 | 性能敏感（不支持 Termux） |
+| **R1-R3** | runc/crun | 高 | 支持 user namespace 的系统 |
+| **S1** | Singularity | 高 | HPC 集群 |
+
+</details>
+
 ### Compose File Support
 
 Supported `docker-compose.yml` features:
@@ -214,6 +302,22 @@ Supported `docker-compose.yml` features:
 | Service scaling | `--scale` | Not supported |
 | Compose profiles | Supported | Not supported |
 
+<details>
+<summary>中文 - 与 Docker Compose 对比</summary>
+
+| 方面 | Docker Compose | udocker-compose |
+|------|---------------|-----------------|
+| 需要 root | 是（或 docker 组） | 不需要 |
+| 守护进程 | 需要 dockerd | 无守护进程 |
+| 网络隔离 | 完整（veth + bridge） | **无** —— 所有服务共享宿主机网络 |
+| 端口映射 | iptables NAT | 不需要映射，端口直接绑定在宿主机上 |
+| 镜像构建 | `docker build` | 不支持 |
+| 命名卷 | Docker 管理 | 本地目录 |
+| 重启策略 | dockerd 监控 | 后台线程 |
+| 服务扩展 | `--scale` | 不支持 |
+
+</details>
+
 ## State Directory
 
 udocker-compose stores runtime state in `.udocker-compose/` within the project directory:
@@ -246,6 +350,23 @@ udocker-compose stores runtime state in `.udocker-compose/` within the project d
 - All modes available depending on cluster configuration
 - Designed for batch job environments
 - MPI integration possible via udocker
+
+<details>
+<summary>中文 - 平台说明</summary>
+
+### Termux / Android
+
+- 仅 Pn 模式可用（推荐 P1）
+- 使用 Termux 的 proot 时设置 `UDOCKER_USE_PROOT_EXECUTABLE=$(which proot)`
+- 无 user namespace 支持，所有容器共享宿主机网络，无隔离
+
+### HPC / 计算集群
+
+- 所有模式可用（取决于集群配置）
+- 专为批处理作业环境设计
+- 可通过 udocker 进行 MPI 集成
+
+</details>
 
 ## Requirements
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""udocker-compose — Docker Compose 兼容的 udocker 编排工具
+"""udocker-compose — A Docker Compose compatible orchestration tool for udocker
 
-功能:
-  - 解析 docker-compose.yml (v2/v3)
-  - 服务依赖拓扑排序与按序启动
-  - 模拟 Docker 网络 (通过 /etc/hosts 注入实现服务名解析)
-  - 命名卷管理 (映射为本地目录)
-  - 进程生命周期管理与自动重启
-  - 健康检查
-  - 日志管理
+Features:
+  - Parse docker-compose.yml (v2/v3)
+  - Topological sorting of service dependencies and ordered startup
+  - Simulated Docker networking (service name resolution via /etc/hosts injection)
+  - Named volume management (mapped to local directories)
+  - Process lifecycle management with automatic restart
+  - Health checks
+  - Log management
 
-用法:
+Usage:
   udocker-compose up [-d] [--no-recreate] [service...]
   udocker-compose down [-v]
   udocker-compose ps
@@ -39,11 +39,11 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    print("错误: 需要 PyYAML。请运行: pip install pyyaml", file=sys.stderr)
+    print("Error: PyYAML is required. Please run: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# 常量
+# Constants
 # ---------------------------------------------------------------------------
 COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
 STATE_DIR_NAME = ".udocker-compose"
@@ -51,7 +51,7 @@ UDOCKER_BIN = os.environ.get("UDOCKER_COMPOSE_UDOCKER", "udocker")
 EXEC_MODE = os.environ.get("UDOCKER_COMPOSE_EXECMODE", "P1")
 
 # ---------------------------------------------------------------------------
-# 工具函数
+# Utility functions
 # ---------------------------------------------------------------------------
 
 def log_info(msg):
@@ -68,7 +68,7 @@ def log_debug(msg):
         print(f"\033[36m[D]\033[0m {msg}", file=sys.stderr)
 
 def run_cmd(cmd, check=True, capture=False, **kwargs):
-    """执行 shell 命令"""
+    """Execute a shell command"""
     log_debug(f"exec: {cmd if isinstance(cmd, str) else ' '.join(cmd)}")
     stdout = subprocess.PIPE if capture else None
     stderr = subprocess.PIPE if capture else None
@@ -77,12 +77,12 @@ def run_cmd(cmd, check=True, capture=False, **kwargs):
     return r
 
 def udocker(*args, check=True, capture=False):
-    """调用 udocker 命令"""
+    """Call a udocker command"""
     cmd = [UDOCKER_BIN] + list(args)
     return run_cmd(cmd, check=check, capture=capture)
 
 def find_compose_file(directory="."):
-    """查找 compose 文件"""
+    """Find a compose file"""
     for name in COMPOSE_FILES:
         p = Path(directory) / name
         if p.exists():
@@ -90,17 +90,17 @@ def find_compose_file(directory="."):
     return None
 
 # ---------------------------------------------------------------------------
-# YAML 解析与规范化
+# YAML parsing and normalization
 # ---------------------------------------------------------------------------
 
 class ComposeConfig:
-    """解析并规范化 docker-compose.yml"""
+    """Parse and normalize docker-compose.yml"""
 
     def __init__(self, filepath, project_name=None):
         self.filepath = Path(filepath).resolve()
         self.project_dir = self.filepath.parent
         self.project_name = project_name or self.project_dir.name
-        # 规范化项目名：只保留字母数字和连字符
+        # Normalize project name: keep only alphanumeric characters and hyphens
         self.project_name = "".join(
             c if c.isalnum() or c in "-_" else "" for c in self.project_name
         ).lower()
@@ -116,7 +116,7 @@ class ComposeConfig:
     def _parse(self):
         raw_services = self.raw.get("services", {})
         if not raw_services:
-            raise ValueError("compose 文件中没有找到 services 定义")
+            raise ValueError("No services definition found in compose file")
 
         self.networks = self.raw.get("networks", {})
         self.volumes = self.raw.get("volumes", {})
@@ -125,7 +125,7 @@ class ComposeConfig:
             self.services[name] = self._normalize_service(name, svc_def)
 
     def _normalize_service(self, name, svc):
-        """将 compose 服务定义规范化为内部格式"""
+        """Normalize a compose service definition into internal format"""
         normalized = {
             "name": name,
             "container_name": svc.get("container_name", f"{self.project_name}_{name}"),
@@ -153,11 +153,11 @@ class ComposeConfig:
             "cap_add": self._normalize_list(svc.get("cap_add")),
         }
 
-        # 如果没有 image 也没有 build，报错
+        # Error if neither image nor build is specified
         if not normalized["image"] and not normalized["build"]:
-            raise ValueError(f"服务 '{name}' 必须指定 image 或 build")
+            raise ValueError(f"Service '{name}' must specify either image or build")
 
-        # 如果有 build 但没有 image，生成一个镜像名
+        # If build is specified but no image, generate an image name
         if normalized["build"] and not normalized["image"]:
             normalized["image"] = f"{self.project_name}_{name}:latest"
 
@@ -168,10 +168,10 @@ class ComposeConfig:
             return None
         if isinstance(cmd, list):
             return cmd
-        return cmd  # 字符串形式，保持原样
+        return cmd  # String form, keep as-is
 
     def _normalize_env(self, env):
-        """统一环境变量为 dict"""
+        """Normalize environment variables into a dict"""
         if env is None:
             return {}
         if isinstance(env, dict):
@@ -195,7 +195,7 @@ class ComposeConfig:
         return list(val)
 
     def _normalize_volumes(self, vols):
-        """规范化 volumes 为 [{host, container, mode}] 列表"""
+        """Normalize volumes into a [{host, container, mode}] list"""
         result = []
         for v in vols:
             if isinstance(v, str):
@@ -215,7 +215,7 @@ class ComposeConfig:
         return result
 
     def _normalize_ports(self, ports):
-        """规范化端口映射为 [{host_port, container_port, protocol}]"""
+        """Normalize port mappings into [{host_port, container_port, protocol}]"""
         result = []
         for p in ports:
             if isinstance(p, (int, float)):
@@ -231,7 +231,7 @@ class ComposeConfig:
                 elif len(parts) == 2:
                     result.append({"host": parts[0], "container": parts[1], "protocol": proto})
                 elif len(parts) == 3:
-                    # host_ip:host_port:container_port — 忽略 host_ip
+                    # host_ip:host_port:container_port — ignore host_ip
                     result.append({"host": parts[1], "container": parts[2], "protocol": proto})
             elif isinstance(p, dict):
                 result.append({
@@ -242,7 +242,7 @@ class ComposeConfig:
         return result
 
     def _normalize_depends(self, deps):
-        """规范化 depends_on"""
+        """Normalize depends_on"""
         if deps is None:
             return []
         if isinstance(deps, list):
@@ -256,7 +256,7 @@ class ComposeConfig:
         return list(self.services.keys())
 
     def get_startup_order(self):
-        """拓扑排序，返回按依赖顺序排列的服务名列表"""
+        """Topological sort, returns service names ordered by dependencies"""
         graph = defaultdict(set)
         in_degree = defaultdict(int)
         all_services = set(self.services.keys())
@@ -265,14 +265,14 @@ class ComposeConfig:
             in_degree.setdefault(name, 0)
             for dep in svc["depends_on"]:
                 if dep not in all_services:
-                    raise ValueError(f"服务 '{name}' 依赖不存在的服务 '{dep}'")
+                    raise ValueError(f"Service '{name}' depends on non-existent service '{dep}'")
                 graph[dep].add(name)
                 in_degree[name] += 1
 
         queue = [s for s in all_services if in_degree[s] == 0]
         order = []
         while queue:
-            queue.sort()  # 稳定排序
+            queue.sort()  # Stable sort
             node = queue.pop(0)
             order.append(node)
             for neighbor in sorted(graph[node]):
@@ -281,17 +281,17 @@ class ComposeConfig:
                     queue.append(neighbor)
 
         if len(order) != len(all_services):
-            raise ValueError("检测到循环依赖！")
+            raise ValueError("Circular dependency detected!")
 
         return order
 
 
 # ---------------------------------------------------------------------------
-# 状态管理
+# State management
 # ---------------------------------------------------------------------------
 
 class StateManager:
-    """管理 .udocker-compose/ 目录下的运行状态"""
+    """Manage runtime state in the .udocker-compose/ directory"""
 
     def __init__(self, project_dir, project_name):
         self.base = Path(project_dir) / STATE_DIR_NAME
@@ -303,7 +303,7 @@ class StateManager:
         self.state_file = self.base / "state.json"
 
     def init(self):
-        """创建目录结构"""
+        """Create directory structure"""
         for d in [self.pids_dir, self.logs_dir, self.volumes_dir, self.network_dir]:
             d.mkdir(parents=True, exist_ok=True)
         if not self.state_file.exists():
@@ -344,7 +344,7 @@ class StateManager:
         if pidfile.exists():
             try:
                 pid = int(pidfile.read_text().strip())
-                # 检查进程是否存活
+                # Check if the process is alive
                 os.kill(pid, 0)
                 return pid
             except (ValueError, ProcessLookupError, PermissionError):
@@ -365,18 +365,18 @@ class StateManager:
 
 
 # ---------------------------------------------------------------------------
-# 网络管理 — 模拟 Docker 网络
+# Network management — Simulated Docker networking
 # ---------------------------------------------------------------------------
 
 class NetworkManager:
-    """通过 /etc/hosts 注入和 bind mount 模拟 Docker 网络
+    """Simulate Docker networking via /etc/hosts injection and bind mounts
 
-    原理:
-      Docker 中同一 network 下的容器可通过服务名互相访问。
-      udocker 所有容器共享宿主机网络栈，因此:
-      1. 生成一个 hosts 文件，将所有服务名映射到 127.0.0.1
-      2. 通过 -v 将该 hosts 文件挂载到每个容器的 /etc/hosts
-      3. 服务间通过 localhost + 各自端口通信
+    Principle:
+      In Docker, containers on the same network can access each other by service name.
+      In udocker, all containers share the host network stack, so:
+      1. Generate a hosts file mapping all service names to 127.0.0.1
+      2. Bind-mount that hosts file into each container's /etc/hosts
+      3. Services communicate via localhost + their respective ports
     """
 
     def __init__(self, state: StateManager, config: ComposeConfig):
@@ -384,26 +384,26 @@ class NetworkManager:
         self.config = config
 
     def generate_hosts_file(self):
-        """生成包含所有服务名映射的 /etc/hosts 文件"""
+        """Generate an /etc/hosts file with all service name mappings"""
         hosts_path = self.state.get_hosts_file()
         lines = [
-            "# Generated by udocker-compose — 模拟 Docker 网络",
+            "# Generated by udocker-compose — Simulated Docker networking",
             "127.0.0.1\tlocalhost",
             "::1\tlocalhost ip6-localhost ip6-loopback",
         ]
 
-        # 为每个服务添加 hostname 和服务名映射
+        # Add hostname and service name mappings for each service
         service_names = set()
         for name, svc in self.config.services.items():
             service_names.add(name)
             service_names.add(svc["container_name"])
             service_names.add(svc["hostname"])
 
-        # 所有服务名 -> 127.0.0.1
+        # Map all service names -> 127.0.0.1
         names_str = "\t".join(sorted(service_names))
         lines.append(f"127.0.0.1\t{names_str}")
 
-        # 添加 extra_hosts
+        # Add extra_hosts
         for name, svc in self.config.services.items():
             for host_entry in svc.get("extra_hosts", []):
                 if ":" in host_entry:
@@ -411,11 +411,11 @@ class NetworkManager:
                     lines.append(f"{ip.strip()}\t{hostname.strip()}")
 
         hosts_path.write_text("\n".join(lines) + "\n")
-        log_info(f"网络: 已生成 hosts 文件 ({len(service_names)} 个服务名)")
+        log_info(f"Network: generated hosts file ({len(service_names)} service names)")
         return hosts_path
 
     def inject_hosts_to_container(self, container_name):
-        """获取容器 rootfs 路径并复制 hosts 文件（备用方案，当 -v 挂载不可靠时）"""
+        """Get the container rootfs path and copy the hosts file (fallback when -v mount is unreliable)"""
         try:
             r = udocker("inspect", "-p", container_name, capture=True, check=False)
             if r.returncode == 0 and r.stdout.strip():
@@ -424,14 +424,14 @@ class NetworkManager:
                 if etc_hosts.parent.exists():
                     hosts_content = self.state.get_hosts_file().read_text()
                     etc_hosts.write_text(hosts_content)
-                    log_debug(f"已注入 hosts 到 {etc_hosts}")
+                    log_debug(f"Injected hosts into {etc_hosts}")
                     return True
         except Exception as e:
-            log_debug(f"hosts 注入失败: {e}")
+            log_debug(f"hosts injection failed: {e}")
         return False
 
     def get_run_args(self):
-        """返回用于 udocker run 的网络相关参数"""
+        """Return network-related arguments for udocker run"""
         hosts_path = self.state.get_hosts_file()
         if hosts_path.exists():
             return ["-v", f"{hosts_path}:/etc/hosts"]
@@ -439,68 +439,68 @@ class NetworkManager:
 
 
 # ---------------------------------------------------------------------------
-# 卷管理
+# Volume management
 # ---------------------------------------------------------------------------
 
 class VolumeManager:
-    """管理命名卷 — 映射为本地目录"""
+    """Manage named volumes — mapped to local directories"""
 
     def __init__(self, state: StateManager, config: ComposeConfig):
         self.state = state
         self.config = config
 
     def ensure_volumes(self):
-        """创建所有命名卷对应的本地目录"""
+        """Create local directories for all named volumes"""
         for vol_name in self.config.volumes:
             vol_path = self.state.get_volume_path(vol_name)
             vol_path.mkdir(parents=True, exist_ok=True)
-            log_debug(f"卷 '{vol_name}' -> {vol_path}")
+            log_debug(f"Volume '{vol_name}' -> {vol_path}")
 
     def resolve_volume_path(self, host_path, service_name):
-        """解析卷路径：命名卷 -> 本地目录，相对路径 -> 绝对路径"""
+        """Resolve volume path: named volume -> local directory, relative path -> absolute path"""
         if host_path is None:
             return None
 
-        # 命名卷
+        # Named volume
         if not host_path.startswith("/") and not host_path.startswith(".") and not host_path.startswith("~"):
             if host_path in self.config.volumes or host_path.replace("-", "_") in self.config.volumes:
                 vol_path = self.state.get_volume_path(host_path)
                 vol_path.mkdir(parents=True, exist_ok=True)
                 return str(vol_path)
 
-        # 相对路径 -> 绝对路径
+        # Relative path -> absolute path
         if host_path.startswith("."):
             return str(self.config.project_dir / host_path)
 
-        # ~ 展开
+        # ~ expansion
         if host_path.startswith("~"):
             return str(Path(host_path).expanduser())
 
         return host_path
 
     def get_run_args(self, service_name):
-        """返回服务的 -v 参数列表"""
+        """Return the -v arguments for a service"""
         svc = self.config.services[service_name]
         args = []
         for vol in svc["volumes"]:
             host = self.resolve_volume_path(vol["host"], service_name)
             container = vol["container"]
             if host:
-                # 确保宿主机目录存在
+                # Ensure host directory exists
                 host_path = Path(host)
                 if not host_path.exists():
                     host_path.mkdir(parents=True, exist_ok=True)
-                    log_debug(f"创建挂载目录: {host}")
+                    log_debug(f"Created mount directory: {host}")
                 args.extend(["-v", f"{host}:{container}"])
         return args
 
 
 # ---------------------------------------------------------------------------
-# 服务管理器
+# Service manager
 # ---------------------------------------------------------------------------
 
 class ServiceManager:
-    """管理单个服务的完整生命周期"""
+    """Manage the full lifecycle of a single service"""
 
     def __init__(self, config: ComposeConfig, state: StateManager,
                  network: NetworkManager, volumes: VolumeManager):
@@ -510,47 +510,47 @@ class ServiceManager:
         self.volumes = volumes
 
     def pull(self, service_name):
-        """拉取服务镜像"""
+        """Pull a service image"""
         svc = self.config.services[service_name]
         image = svc["image"]
 
         if svc["build"] and not svc.get("image"):
-            log_warn(f"服务 '{service_name}' 使用 build，udocker 不支持构建。请在其他地方构建后 save/load")
+            log_warn(f"Service '{service_name}' uses build, which udocker does not support. Please build elsewhere then save/load")
             return False
 
-        log_info(f"拉取镜像: {image}")
+        log_info(f"Pulling image: {image}")
         r = udocker("pull", image, check=False)
         if r.returncode != 0:
-            log_error(f"拉取 {image} 失败")
+            log_error(f"Failed to pull {image}")
             return False
         return True
 
     def create(self, service_name, force=False):
-        """创建容器"""
+        """Create a container"""
         svc = self.config.services[service_name]
         container_name = svc["container_name"]
         image = svc["image"]
 
-        # 检查容器是否已存在
+        # Check if container already exists
         r = udocker("inspect", container_name, check=False, capture=True)
         if r.returncode == 0 and not force:
-            log_info(f"容器 '{container_name}' 已存在，跳过创建")
+            log_info(f"Container '{container_name}' already exists, skipping creation")
             return True
 
         if r.returncode == 0 and force:
-            log_info(f"删除旧容器 '{container_name}'")
+            log_info(f"Removing old container '{container_name}'")
             udocker("rm", "-f", container_name, check=False)
 
-        log_info(f"创建容器: {container_name} <- {image}")
+        log_info(f"Creating container: {container_name} <- {image}")
         r = udocker("create", f"--name={container_name}", image, check=False)
         if r.returncode != 0:
-            log_error(f"创建容器 '{container_name}' 失败")
+            log_error(f"Failed to create container '{container_name}'")
             return False
 
-        # 设置执行模式
+        # Set execution mode
         udocker("setup", f"--execmode={EXEC_MODE}", container_name, check=False)
 
-        # 注入 hosts 文件到容器 rootfs
+        # Inject hosts file into container rootfs
         self.network.inject_hosts_to_container(container_name)
 
         self.state.set_service_state(service_name,
@@ -560,12 +560,12 @@ class ServiceManager:
         return True
 
     def _build_run_args(self, service_name, extra_args=None):
-        """构建 udocker run 的完整参数列表"""
+        """Build the full argument list for udocker run"""
         svc = self.config.services[service_name]
         container_name = svc["container_name"]
         args = []
 
-        # 环境变量
+        # Environment variables
         for key, val in svc["environment"].items():
             args.extend(["-e", f"{key}={val}"])
 
@@ -575,28 +575,28 @@ class ServiceManager:
             if ef_path.exists():
                 args.extend(["--env-file", str(ef_path)])
             else:
-                log_warn(f"env_file 不存在: {ef}")
+                log_warn(f"env_file not found: {ef}")
 
-        # 卷挂载
+        # Volume mounts
         args.extend(self.volumes.get_run_args(service_name))
 
-        # 网络 (hosts 文件挂载)
+        # Network (hosts file mount)
         args.extend(self.network.get_run_args())
 
-        # 端口映射 (仅 Pn 模式)
+        # Port mapping (Pn mode only)
         if EXEC_MODE.startswith("P"):
             for port in svc["ports"]:
                 args.extend(["--publish", f"{port['host']}:{port['container']}"])
 
-        # 工作目录
+        # Working directory
         if svc["working_dir"]:
             args.extend(["-w", svc["working_dir"]])
 
-        # 用户
+        # User
         if svc["user"]:
             args.extend(["--user", str(svc["user"])])
 
-        # 主机名（通过环境变量传递，PRoot 下 hostname 命令不一定可靠）
+        # Hostname (passed via environment variable, hostname command may not be reliable under PRoot)
         args.extend(["-e", f"HOSTNAME={svc['hostname']}"])
 
         # entrypoint
@@ -606,33 +606,33 @@ class ServiceManager:
             elif isinstance(svc["entrypoint"], str):
                 args.extend(["--entrypoint", svc["entrypoint"]])
 
-        # 设备 (仅 Rn 模式)
+        # Devices (Rn mode only)
         if svc["devices"] and EXEC_MODE.startswith("R"):
             for dev in svc["devices"]:
                 args.extend(["--device", dev])
 
-        # 额外参数
+        # Extra arguments
         if extra_args:
             args.extend(extra_args)
 
         return args
 
     def start(self, service_name, detach=True):
-        """启动服务"""
+        """Start a service"""
         svc = self.config.services[service_name]
         container_name = svc["container_name"]
 
-        # 检查是否已在运行
+        # Check if already running
         pid = self.state.get_pid(service_name)
         if pid:
-            log_info(f"服务 '{service_name}' 已在运行 (PID: {pid})")
+            log_info(f"Service '{service_name}' is already running (PID: {pid})")
             return True
 
-        # 构建命令
+        # Build command
         run_args = self._build_run_args(service_name)
         cmd_parts = [UDOCKER_BIN, "run"] + run_args + [container_name]
 
-        # 追加 command
+        # Append command
         command = svc["command"]
         if command:
             if isinstance(command, list):
@@ -640,8 +640,8 @@ class ServiceManager:
             else:
                 cmd_parts.extend(command.split())
 
-        log_info(f"启动服务: {service_name} (容器: {container_name})")
-        log_debug(f"命令: {' '.join(cmd_parts)}")
+        log_info(f"Starting service: {service_name} (container: {container_name})")
+        log_debug(f"Command: {' '.join(cmd_parts)}")
 
         if detach:
             log_path = self.state.get_log_path(service_name)
@@ -659,10 +659,10 @@ class ServiceManager:
             )
             self.state.save_pid(service_name, proc.pid)
             self.state.set_service_state(service_name, pid=proc.pid, status="running")
-            log_info(f"  -> PID: {proc.pid}, 日志: {log_path}")
+            log_info(f"  -> PID: {proc.pid}, log: {log_path}")
             return True
         else:
-            # 前台运行
+            # Foreground mode
             try:
                 r = subprocess.run(cmd_parts)
                 return r.returncode == 0
@@ -670,17 +670,17 @@ class ServiceManager:
                 return False
 
     def stop(self, service_name, timeout=10):
-        """停止服务"""
+        """Stop a service"""
         pid = self.state.get_pid(service_name)
         if not pid:
-            log_info(f"服务 '{service_name}' 未在运行")
+            log_info(f"Service '{service_name}' is not running")
             return True
 
-        log_info(f"停止服务: {service_name} (PID: {pid})")
+        log_info(f"Stopping service: {service_name} (PID: {pid})")
         try:
-            # 先发 SIGTERM
+            # Send SIGTERM first
             os.killpg(os.getpgid(pid), signal.SIGTERM)
-            # 等待退出
+            # Wait for exit
             for _ in range(timeout * 10):
                 try:
                     os.kill(pid, 0)
@@ -688,8 +688,8 @@ class ServiceManager:
                 except ProcessLookupError:
                     break
             else:
-                # 超时，强制杀
-                log_warn(f"服务 '{service_name}' 未响应 SIGTERM，发送 SIGKILL")
+                # Timeout, force kill
+                log_warn(f"Service '{service_name}' did not respond to SIGTERM, sending SIGKILL")
                 try:
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
@@ -702,11 +702,11 @@ class ServiceManager:
         return True
 
     def remove(self, service_name):
-        """删除容器"""
+        """Remove a container"""
         svc = self.config.services[service_name]
         container_name = svc["container_name"]
         self.stop(service_name)
-        log_info(f"删除容器: {container_name}")
+        log_info(f"Removing container: {container_name}")
         udocker("rm", "-f", container_name, check=False)
         self.state.remove_service_state(service_name)
 
@@ -723,7 +723,7 @@ class ServiceManager:
         return "not created"
 
     def check_health(self, service_name, timeout=60):
-        """执行健康检查"""
+        """Execute a health check"""
         svc = self.config.services[service_name]
         hc = svc.get("healthcheck")
         if not hc or hc.get("disable"):
@@ -740,12 +740,12 @@ class ServiceManager:
 
         container_name = svc["container_name"]
 
-        # 等待 start_period
+        # Wait for start_period
         if start_period > 0:
-            log_debug(f"健康检查: 等待启动期 {start_period}s")
+            log_debug(f"Health check: waiting for start period {start_period}s")
             time.sleep(start_period)
 
-        # 构建检查命令
+        # Build the check command
         if isinstance(test, list):
             if test[0] == "CMD-SHELL":
                 check_cmd = test[1]
@@ -757,23 +757,23 @@ class ServiceManager:
             check_cmd = test
 
         for attempt in range(1, retries + 1):
-            log_debug(f"健康检查 {service_name}: 第 {attempt}/{retries} 次")
+            log_debug(f"Health check {service_name}: attempt {attempt}/{retries}")
             r = run_cmd(
                 [UDOCKER_BIN, "run", container_name, "sh", "-c", check_cmd],
                 check=False, capture=True,
             )
             if r.returncode == 0:
-                log_info(f"健康检查通过: {service_name}")
+                log_info(f"Health check passed: {service_name}")
                 return True
             if attempt < retries:
                 time.sleep(interval)
 
-        log_warn(f"健康检查失败: {service_name} ({retries} 次重试后)")
+        log_warn(f"Health check failed: {service_name} (after {retries} retries)")
         return False
 
     @staticmethod
     def _parse_duration(s):
-        """解析 Docker duration 字符串 (10s, 1m, 500ms)"""
+        """Parse a Docker duration string (10s, 1m, 500ms)"""
         if isinstance(s, (int, float)):
             return float(s)
         s = str(s).strip()
@@ -789,11 +789,11 @@ class ServiceManager:
 
 
 # ---------------------------------------------------------------------------
-# 自动重启守护
+# Automatic restart supervisor
 # ---------------------------------------------------------------------------
 
 class RestartSupervisor:
-    """监控服务进程，按 restart 策略自动重启"""
+    """Monitor service processes and auto-restart according to restart policy"""
 
     def __init__(self, svc_manager: ServiceManager, config: ComposeConfig, state: StateManager):
         self.svc_manager = svc_manager
@@ -802,7 +802,7 @@ class RestartSupervisor:
         self._running = False
 
     def start(self):
-        """在后台线程中监控并重启服务"""
+        """Monitor and restart services in a background thread"""
         self._running = True
         import threading
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -823,18 +823,18 @@ class RestartSupervisor:
                 if pid is None:
                     svc_state = self.state.get_service_state(name)
                     if svc_state.get("status") == "running":
-                        # 进程已退出但状态还是 running —— 需要重启
+                        # Process has exited but status is still running — needs restart
                         if policy in ("always", "unless-stopped"):
-                            log_info(f"自动重启: {name}")
+                            log_info(f"Auto-restarting: {name}")
                             self.svc_manager.start(name, detach=True)
 
 
 # ---------------------------------------------------------------------------
-# 主编排器
+# Main orchestrator
 # ---------------------------------------------------------------------------
 
 class UdockerCompose:
-    """主入口：解析命令并执行编排"""
+    """Main entry point: parse commands and execute orchestration"""
 
     def __init__(self, compose_file=None, project_name=None):
         if compose_file:
@@ -842,7 +842,7 @@ class UdockerCompose:
         else:
             self.compose_file = find_compose_file()
             if not self.compose_file:
-                log_error(f"未找到 compose 文件。支持的文件名: {', '.join(COMPOSE_FILES)}")
+                log_error(f"Compose file not found. Supported filenames: {', '.join(COMPOSE_FILES)}")
                 sys.exit(1)
 
         self.config = ComposeConfig(self.compose_file, project_name)
@@ -853,32 +853,32 @@ class UdockerCompose:
         self.supervisor = RestartSupervisor(self.svc_mgr, self.config, self.state)
 
     def _filter_services(self, names):
-        """如果指定了服务名就过滤，否则返回全部"""
+        """Filter by specified service names, or return all if none specified"""
         if not names:
             return self.config.get_startup_order()
         for n in names:
             if n not in self.config.services:
-                log_error(f"未知服务: '{n}'")
-                log_info(f"可用服务: {', '.join(self.config.get_service_names())}")
+                log_error(f"Unknown service: '{n}'")
+                log_info(f"Available services: {', '.join(self.config.get_service_names())}")
                 sys.exit(1)
         return names
 
     def cmd_up(self, services=None, detach=False, no_recreate=False):
-        """启动服务 (相当于 docker-compose up)"""
+        """Start services (equivalent to docker-compose up)"""
         self.state.init()
 
-        # 生成 hosts 文件（网络）
+        # Generate hosts file (networking)
         self.network.generate_hosts_file()
 
-        # 创建命名卷
+        # Create named volumes
         self.volumes.ensure_volumes()
 
         order = self.config.get_startup_order()
         targets = self._filter_services(services)
-        # 按拓扑序过滤
+        # Filter by topological order
         order = [s for s in order if s in targets]
 
-        # 同时也包含依赖的服务
+        # Also include dependent services
         all_needed = set()
         def collect_deps(name):
             all_needed.add(name)
@@ -889,51 +889,51 @@ class UdockerCompose:
 
         order = [s for s in self.config.get_startup_order() if s in all_needed]
 
-        log_info(f"启动顺序: {' -> '.join(order)}")
+        log_info(f"Startup order: {' -> '.join(order)}")
         print()
 
         for name in order:
-            # 拉取镜像（如果本地不存在）
+            # Pull image (if not available locally)
             svc = self.config.services[name]
             if svc["build"]:
-                log_warn(f"服务 '{name}' 使用 build 指令 — udocker 不支持构建。")
-                log_warn(f"  请先在有 Docker 的机器上构建镜像并 docker save，然后用 udocker load 导入。")
+                log_warn(f"Service '{name}' uses build directive — udocker does not support building.")
+                log_warn(f"  Please build the image on a machine with Docker and docker save, then import with udocker load.")
                 if not svc["image"]:
                     continue
 
-            # 创建容器
+            # Create container
             force = not no_recreate
             self.svc_mgr.create(name, force=force)
 
-            # 注入 hosts 到容器（双重保障）
+            # Inject hosts into container (double assurance)
             self.network.inject_hosts_to_container(svc["container_name"])
 
-            # 启动
+            # Start
             self.svc_mgr.start(name, detach=detach or len(order) > 1)
 
-            # 等一下让服务启动
+            # Wait briefly for service to start
             time.sleep(1)
 
             print()
 
         if detach or len(order) > 1:
-            # 启动自动重启监控
+            # Start automatic restart monitor
             self.supervisor.start()
 
-            # 打印摘要
+            # Print summary
             print()
             self._print_status_table(order)
             print()
 
-            # 打印访问信息
+            # Print access info
             for name in order:
                 svc = self.config.services[name]
                 for port in svc["ports"]:
                     log_info(f"  {name}: http://localhost:{port['host']}")
 
             if not detach:
-                # 前台模式 — 等待所有进程
-                log_info("按 Ctrl+C 停止所有服务")
+                # Foreground mode — wait for all processes
+                log_info("Press Ctrl+C to stop all services")
                 try:
                     while True:
                         time.sleep(1)
@@ -942,37 +942,37 @@ class UdockerCompose:
                     self.cmd_down()
         else:
             if not detach:
-                # 单服务前台模式
+                # Single service foreground mode
                 self.svc_mgr.start(order[0], detach=False)
 
     def cmd_down(self, remove_volumes=False, services=None):
-        """停止并删除所有服务"""
+        """Stop and remove all services"""
         self.supervisor.stop()
         order = self.config.get_startup_order()
         if services:
             order = [s for s in order if s in services]
-        # 反向停止
+        # Stop in reverse order
         for name in reversed(order):
             self.svc_mgr.remove(name)
 
         if remove_volumes:
-            log_info("删除命名卷...")
+            log_info("Removing named volumes...")
             for vol_name in self.config.volumes:
                 vol_path = self.state.get_volume_path(vol_name)
                 if vol_path.exists():
                     import shutil
                     shutil.rmtree(vol_path, ignore_errors=True)
-                    log_info(f"  已删除: {vol_name}")
+                    log_info(f"  Removed: {vol_name}")
 
-        log_info("所有服务已停止并清理")
+        log_info("All services stopped and cleaned up")
 
     def cmd_ps(self, services=None):
-        """显示服务状态"""
+        """Show service status"""
         names = self._filter_services(services)
         self._print_status_table(names)
 
     def _print_status_table(self, names):
-        """打印状态表格"""
+        """Print status table"""
         header = f"{'SERVICE':<20} {'CONTAINER':<30} {'STATUS':<25} {'PORTS'}"
         print(header)
         print("-" * len(header) + "-" * 20)
@@ -981,7 +981,7 @@ class UdockerCompose:
             status = self.svc_mgr.get_status(name)
             ports = ", ".join(f"{p['host']}->{p['container']}/{p['protocol']}" for p in svc["ports"])
             container = svc["container_name"]
-            # 颜色
+            # Color
             if "running" in status:
                 status_colored = f"\033[32m{status}\033[0m"
             elif status == "stopped":
@@ -991,25 +991,25 @@ class UdockerCompose:
             print(f"{name:<20} {container:<30} {status_colored:<35} {ports}")
 
     def cmd_pull(self, services=None):
-        """拉取所有镜像"""
+        """Pull all images"""
         names = self._filter_services(services)
         for name in names:
             self.svc_mgr.pull(name)
 
     def cmd_logs(self, services=None, follow=False, tail=50):
-        """查看日志"""
+        """View logs"""
         self.state.init()
         names = self._filter_services(services)
 
         if follow:
-            # 使用 tail -f 跟踪多个日志文件
+            # Follow multiple log files with tail -f
             log_files = []
             for name in names:
                 log_path = self.state.get_log_path(name)
                 if log_path.exists():
                     log_files.append(str(log_path))
             if not log_files:
-                log_warn("没有日志文件")
+                log_warn("No log files found")
                 return
             cmd = ["tail", "-f", "-n", str(tail)] + log_files
             try:
@@ -1026,10 +1026,10 @@ class UdockerCompose:
                         print(line)
                     print()
                 else:
-                    log_warn(f"服务 '{name}' 无日志")
+                    log_warn(f"Service '{name}' has no logs")
 
     def cmd_restart(self, services=None):
-        """重启服务"""
+        """Restart services"""
         names = self._filter_services(services)
         for name in names:
             self.svc_mgr.stop(name)
@@ -1037,13 +1037,13 @@ class UdockerCompose:
             self.svc_mgr.start(name, detach=True)
 
     def cmd_stop(self, services=None):
-        """停止服务（不删除容器）"""
+        """Stop services without removing containers"""
         names = self._filter_services(services)
         for name in reversed(names):
             self.svc_mgr.stop(name)
 
     def cmd_start(self, services=None):
-        """启动已停止的服务"""
+        """Start stopped services"""
         self.state.init()
         self.network.generate_hosts_file()
         names = self._filter_services(services)
@@ -1053,9 +1053,9 @@ class UdockerCompose:
             self.svc_mgr.start(name, detach=True)
 
     def cmd_exec(self, service_name, command):
-        """在服务容器中执行命令"""
+        """Execute a command in a service container"""
         if service_name not in self.config.services:
-            log_error(f"未知服务: '{service_name}'")
+            log_error(f"Unknown service: '{service_name}'")
             sys.exit(1)
 
         svc = self.config.services[service_name]
@@ -1068,9 +1068,9 @@ class UdockerCompose:
         return r.returncode
 
     def cmd_run(self, service_name, command, rm=False):
-        """在服务容器中运行一次性命令"""
+        """Run a one-off command in a service container"""
         if service_name not in self.config.services:
-            log_error(f"未知服务: '{service_name}'")
+            log_error(f"Unknown service: '{service_name}'")
             sys.exit(1)
 
         self.state.init()
@@ -1078,7 +1078,7 @@ class UdockerCompose:
         self.volumes.ensure_volumes()
 
         svc = self.config.services[service_name]
-        # 创建临时容器
+        # Create temporary container
         tmp_name = f"{svc['container_name']}_run_{int(time.time())}"
         image = svc["image"]
 
@@ -1089,7 +1089,7 @@ class UdockerCompose:
         run_args = self.svc_mgr._build_run_args(service_name)
         cmd_parts = [UDOCKER_BIN, "run"] + run_args
 
-        # 替换容器名为临时容器
+        # Use temporary container name
         cmd_parts.append(tmp_name)
         cmd_parts.extend(command)
 
@@ -1101,24 +1101,24 @@ class UdockerCompose:
                 udocker("rm", "-f", tmp_name, check=False)
 
     def cmd_config(self):
-        """验证并显示配置"""
-        print(f"项目名: {self.config.project_name}")
-        print(f"配置文件: {self.config.filepath}")
-        print(f"执行模式: {EXEC_MODE}")
+        """Validate and display configuration"""
+        print(f"Project: {self.config.project_name}")
+        print(f"Compose file: {self.config.filepath}")
+        print(f"Exec mode: {EXEC_MODE}")
         print()
 
         order = self.config.get_startup_order()
-        print(f"启动顺序: {' -> '.join(order)}")
+        print(f"Startup order: {' -> '.join(order)}")
         print()
 
-        print("服务:")
+        print("Services:")
         for name in order:
             svc = self.config.services[name]
             print(f"  {name}:")
             print(f"    image: {svc['image']}")
             print(f"    container: {svc['container_name']}")
             if svc["build"]:
-                print(f"    build: {svc['build']} (⚠ udocker 不支持)")
+                print(f"    build: {svc['build']} (not supported by udocker)")
             if svc["ports"]:
                 ports = ", ".join(f"{p['host']}:{p['container']}" for p in svc["ports"])
                 print(f"    ports: {ports}")
@@ -1133,107 +1133,107 @@ class UdockerCompose:
             print(f"    restart: {svc['restart']}")
             print()
 
-        print("网络:")
+        print("Networks:")
         if self.config.networks:
             for net in self.config.networks:
-                print(f"  {net} -> 模拟 (所有服务共享宿主机网络, /etc/hosts 映射)")
+                print(f"  {net} -> host network (/etc/hosts name mapping)")
         else:
-            print("  default -> 模拟 (所有服务共享宿主机网络, /etc/hosts 映射)")
+            print("  default -> host network (/etc/hosts name mapping)")
         print()
 
         if self.config.volumes:
-            print("命名卷:")
+            print("Named volumes:")
             for vol in self.config.volumes:
                 print(f"  {vol} -> {self.state.get_volume_path(vol)}")
             print()
 
 
 # ---------------------------------------------------------------------------
-# CLI 入口
+# CLI Entry Point
 # ---------------------------------------------------------------------------
 
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="udocker-compose",
-        description="Docker Compose 兼容的 udocker 编排工具",
+        description="Docker Compose compatible orchestration tool for udocker",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
-            环境变量:
-              UDOCKER_COMPOSE_UDOCKER   udocker 可执行文件路径 (默认: udocker)
-              UDOCKER_COMPOSE_EXECMODE  执行模式 (默认: P1, 可选: P1,P2,F1-F4,R1-R3,S1)
-              UDOCKER_COMPOSE_DEBUG     设为 1 启用调试输出
+            Environment variables:
+              UDOCKER_COMPOSE_UDOCKER   Path to udocker binary (default: udocker)
+              UDOCKER_COMPOSE_EXECMODE  Execution mode (default: P1, options: P1,P2,F1-F4,R1-R3,S1)
+              UDOCKER_COMPOSE_DEBUG     Set to 1 for debug output
 
-            示例:
-              udocker-compose up -d                     # 后台启动所有服务
-              udocker-compose up redis postgres          # 只启动指定服务
-              udocker-compose down -v                    # 停止并删除卷
-              udocker-compose logs -f new-api            # 跟踪日志
-              udocker-compose exec new-api sh            # 进入容器
-              udocker-compose config                     # 查看解析后的配置
+            Examples:
+              udocker-compose up -d                     # Start all services in background
+              udocker-compose up redis postgres          # Start specific services only
+              udocker-compose down -v                    # Stop and remove volumes
+              udocker-compose logs -f new-api            # Follow logs
+              udocker-compose exec new-api sh            # Execute shell in container
+              udocker-compose config                     # Show parsed configuration
 
-            限制:
-              - 不支持 docker build (需要 save/load 镜像)
-              - 网络通过 /etc/hosts 模拟 (所有服务共享宿主机网络)
-              - 端口映射仅在 Pn 模式下有效
-              - 不支持 < 1024 端口
+            Limitations:
+              - No docker build support (use save/load for images)
+              - No network isolation (all services share host network)
+              - Port mapping only works in Pn modes
+              - Cannot bind ports < 1024
         """),
     )
 
-    parser.add_argument("-f", "--file", help="指定 compose 文件路径")
-    parser.add_argument("-p", "--project-name", help="项目名称")
+    parser.add_argument("-f", "--file", help="Compose file path")
+    parser.add_argument("-p", "--project-name", help="Project name")
 
-    sub = parser.add_subparsers(dest="command", help="子命令")
+    sub = parser.add_subparsers(dest="command", help="Subcommands")
 
     # up
-    p_up = sub.add_parser("up", help="创建并启动服务")
-    p_up.add_argument("-d", "--detach", action="store_true", help="后台运行")
-    p_up.add_argument("--no-recreate", action="store_true", help="不重新创建已存在的容器")
-    p_up.add_argument("services", nargs="*", help="指定服务名")
+    p_up = sub.add_parser("up", help="Create and start services")
+    p_up.add_argument("-d", "--detach", action="store_true", help="Run in background")
+    p_up.add_argument("--no-recreate", action="store_true", help="Do not recreate existing containers")
+    p_up.add_argument("services", nargs="*", help="Service names")
 
     # down
-    p_down = sub.add_parser("down", help="停止并删除服务")
-    p_down.add_argument("-v", "--volumes", action="store_true", help="同时删除命名卷")
-    p_down.add_argument("services", nargs="*", help="指定服务名")
+    p_down = sub.add_parser("down", help="Stop and remove services")
+    p_down.add_argument("-v", "--volumes", action="store_true", help="Also remove named volumes")
+    p_down.add_argument("services", nargs="*", help="Service names")
 
     # ps
-    p_ps = sub.add_parser("ps", help="列出服务状态")
+    p_ps = sub.add_parser("ps", help="List service status")
     p_ps.add_argument("services", nargs="*")
 
     # pull
-    p_pull = sub.add_parser("pull", help="拉取镜像")
+    p_pull = sub.add_parser("pull", help="Pull images")
     p_pull.add_argument("services", nargs="*")
 
     # logs
-    p_logs = sub.add_parser("logs", help="查看日志")
-    p_logs.add_argument("-f", "--follow", action="store_true", help="实时跟踪")
-    p_logs.add_argument("-n", "--tail", type=int, default=50, help="显示最后 N 行")
+    p_logs = sub.add_parser("logs", help="View logs")
+    p_logs.add_argument("-f", "--follow", action="store_true", help="Follow log output")
+    p_logs.add_argument("-n", "--tail", type=int, default=50, help="Number of lines to show")
     p_logs.add_argument("services", nargs="*")
 
     # restart
-    p_restart = sub.add_parser("restart", help="重启服务")
+    p_restart = sub.add_parser("restart", help="Restart services")
     p_restart.add_argument("services", nargs="*")
 
     # stop
-    p_stop = sub.add_parser("stop", help="停止服务")
+    p_stop = sub.add_parser("stop", help="Stop services")
     p_stop.add_argument("services", nargs="*")
 
     # start
-    p_start = sub.add_parser("start", help="启动已停止的服务")
+    p_start = sub.add_parser("start", help="Start stopped services")
     p_start.add_argument("services", nargs="*")
 
     # exec
-    p_exec = sub.add_parser("exec", help="在容器中执行命令")
-    p_exec.add_argument("service", help="服务名")
-    p_exec.add_argument("exec_command", nargs=argparse.REMAINDER, help="要执行的命令")
+    p_exec = sub.add_parser("exec", help="Execute command in container")
+    p_exec.add_argument("service", help="Service name")
+    p_exec.add_argument("exec_command", nargs=argparse.REMAINDER, help="Command to execute")
 
     # run
-    p_run = sub.add_parser("run", help="运行一次性命令")
-    p_run.add_argument("--rm", action="store_true", help="完成后删除容器")
-    p_run.add_argument("service", help="服务名")
-    p_run.add_argument("run_command", nargs=argparse.REMAINDER, help="要执行的命令")
+    p_run = sub.add_parser("run", help="Run a one-off command")
+    p_run.add_argument("--rm", action="store_true", help="Remove container after exit")
+    p_run.add_argument("service", help="Service name")
+    p_run.add_argument("run_command", nargs=argparse.REMAINDER, help="Command to run")
 
     # config
-    sub.add_parser("config", help="查看解析后的配置")
+    sub.add_parser("config", help="Show parsed configuration")
 
     return parser
 
@@ -1246,10 +1246,10 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    # 信号处理 — 不在这里注册 SIGINT，留给各命令自行处理 KeyboardInterrupt
+    # Signal handling — don't register SIGINT here, let KeyboardInterrupt propagate
     def sigterm_handler(sig, frame):
         print()
-        log_info("收到 SIGTERM，正在停止...")
+        log_info("Received SIGTERM, shutting down...")
         sys.exit(143)
     signal.signal(signal.SIGTERM, sigterm_handler)
 
@@ -1259,7 +1259,7 @@ def main():
         log_error(str(e))
         sys.exit(1)
     except ValueError as e:
-        log_error(f"配置错误: {e}")
+        log_error(f"Config error: {e}")
         sys.exit(1)
 
     cmd = args.command
