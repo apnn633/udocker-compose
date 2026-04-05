@@ -4,23 +4,22 @@ Docker Compose compatible orchestration tool for [udocker](https://github.com/in
 
 ## Why?
 
-udocker lets unprivileged users run Docker containers without Docker installed. But it lacks two key features:
+udocker lets unprivileged users run Docker containers without Docker installed. But it has no `docker-compose` — you have to manage each container manually, rewrite service hostnames, and wire everything up by hand.
 
-1. **No `docker-compose`** — you have to manage each container manually
-2. **No container networking** — services can't discover each other by name
-
-**udocker-compose** fills both gaps. It parses standard `docker-compose.yml` files and orchestrates udocker containers with simulated networking via `/etc/hosts` injection.
+**udocker-compose** adds compose-style orchestration so you can use existing `docker-compose.yml` files with udocker directly.
 
 ## Features
 
-- Parses `docker-compose.yml` (v2/v3 format)
+- Parses `docker-compose.yml` (v2/v3 format) — use your existing compose files as-is
 - Topological dependency resolution (`depends_on`)
-- Simulated Docker networking (service name DNS via `/etc/hosts`)
+- Service name resolution via `/etc/hosts` injection — no need to rewrite `postgres` to `127.0.0.1` in connection strings
 - Named volume management (mapped to local directories)
 - Background/foreground execution with log management
 - Auto-restart supervision (`restart: always/unless-stopped`)
 - Health checks
 - Single-file, zero-dependency (only requires Python 3 + PyYAML)
+
+> **Note:** udocker runs all containers directly on the host network — there is **no network isolation** between containers. The `/etc/hosts` injection is purely a convenience feature that maps service names (like `postgres`, `redis`) to `127.0.0.1`, so your compose files work without modification. It does not provide any form of network isolation or virtual networking.
 
 ## Quick Start
 
@@ -69,15 +68,13 @@ udocker-compose down -v        # Also remove named volumes
 | `run [--rm] <service> <cmd>` | Run a one-off command |
 | `config` | Validate and display parsed configuration |
 
-## How Networking Works
+## Service Name Resolution
 
-Docker creates isolated virtual networks where containers get their own IPs and discover each other by service name. udocker cannot do this (no root = no network namespaces).
+In Docker Compose, containers on the same network can reach each other by service name (e.g., `postgres:5432`). This works because Docker creates virtual networks with built-in DNS.
 
-**udocker-compose** simulates this by:
+udocker has **no network isolation** — all containers run directly on the host network stack, sharing the same ports and IP. There are no virtual networks, no per-container IPs, and no DNS.
 
-1. Generating an `/etc/hosts` file mapping all service names to `127.0.0.1`
-2. Bind-mounting this file into every container
-3. Injecting it into the container rootfs as a fallback
+To let you use existing `docker-compose.yml` files **without rewriting connection strings**, udocker-compose injects an `/etc/hosts` file into each container that maps all service names to `127.0.0.1`:
 
 ```
 # Auto-generated /etc/hosts inside each container:
@@ -85,14 +82,15 @@ Docker creates isolated virtual networks where containers get their own IPs and 
 127.0.0.1   new-api   postgres   redis
 ```
 
-This means connection strings like `postgresql://user:pass@postgres:5432/db` work **without modification** — `postgres` resolves to `127.0.0.1`, where the postgres service is actually listening.
+So `postgresql://user:pass@postgres:5432/db` just works — `postgres` resolves to `127.0.0.1`, where the postgres process is already listening. **This is not networking — it's just hostname aliasing for convenience.**
 
-### Networking Limitations
+### What this does NOT provide
 
-- All services share the host network stack — no isolation
-- Two services cannot bind the same port (workaround: change one via config/command)
-- Ports below 1024 require root
-- No virtual network creation (`docker network` equivalent)
+- No network isolation — every service is reachable from the host and from each other
+- No per-container IP addresses
+- No virtual networks or bridge interfaces
+- Two services cannot bind the same port (they share the host's port space)
+- Ports below 1024 still require root
 
 ## Example: Multi-Service Application
 
@@ -192,7 +190,7 @@ Supported `docker-compose.yml` features:
 | `depends_on` | Supported | Topological sort |
 | `restart` | Supported | `always`, `unless-stopped` |
 | `healthcheck` | Supported | CMD, CMD-SHELL |
-| `networks` | Simulated | `/etc/hosts` injection |
+| `networks` | Partial | No isolation; service names mapped to `127.0.0.1` via `/etc/hosts` |
 | `container_name` | Supported | |
 | `hostname` | Supported | Via env var |
 | `working_dir` | Supported | |
@@ -208,8 +206,8 @@ Supported `docker-compose.yml` features:
 |--------|---------------|-----------------|
 | Root required | Yes (or docker group) | No |
 | Daemon | Requires dockerd | No daemon |
-| Network isolation | Full (veth + bridge) | Simulated (/etc/hosts) |
-| Port mapping | iptables NAT | Direct host binding |
+| Network isolation | Full (veth + bridge) | **None** — all services share host network |
+| Port mapping | iptables NAT | No mapping needed — ports bind directly on host |
 | Image building | `docker build` | Not supported |
 | Named volumes | Managed by Docker | Local directories |
 | Restart policy | dockerd supervises | Background thread |
@@ -241,7 +239,7 @@ udocker-compose stores runtime state in `.udocker-compose/` within the project d
 
 - Only Pn modes work (P1 recommended)
 - Set `UDOCKER_USE_PROOT_EXECUTABLE=$(which proot)` if using Termux's proot
-- No user namespace support — networking is host-only
+- No user namespace support — all containers share host network, no isolation
 
 ### HPC / Compute Clusters
 
