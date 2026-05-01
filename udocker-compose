@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -559,6 +560,26 @@ class ServiceManager:
                                      created=True)
         return True
 
+    def _split_shell_like(self, value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return list(value)
+        return shlex.split(value)
+
+    def _get_entrypoint_and_command(self, service_name):
+        svc = self.config.services[service_name]
+        raw_entrypoint = svc["entrypoint"]
+        entrypoint = self._split_shell_like(raw_entrypoint)
+        command = self._split_shell_like(svc["command"])
+        return raw_entrypoint, entrypoint, command
+
+    def _get_service_command(self, service_name):
+        _, entrypoint, command = self._get_entrypoint_and_command(service_name)
+        if entrypoint:
+            return entrypoint[1:] + command
+        return command
+
     def _build_run_args(self, service_name, extra_args=None):
         """Build the full argument list for udocker run"""
         svc = self.config.services[service_name]
@@ -600,11 +621,11 @@ class ServiceManager:
         args.extend(["-e", f"HOSTNAME={svc['hostname']}"])
 
         # entrypoint
-        if svc["entrypoint"] is not None:
-            if isinstance(svc["entrypoint"], list):
-                args.extend(["--entrypoint", svc["entrypoint"][0]])
-            elif isinstance(svc["entrypoint"], str):
-                args.extend(["--entrypoint", svc["entrypoint"]])
+        raw_entrypoint, entrypoint, _ = self._get_entrypoint_and_command(service_name)
+        if raw_entrypoint == "":
+            args.extend(["--entrypoint", ""])
+        elif entrypoint:
+            args.extend(["--entrypoint", entrypoint[0]])
 
         # Devices (Rn mode only)
         if svc["devices"] and EXEC_MODE.startswith("R"):
@@ -631,14 +652,7 @@ class ServiceManager:
         # Build command
         run_args = self._build_run_args(service_name)
         cmd_parts = [UDOCKER_BIN, "run"] + run_args + [container_name]
-
-        # Append command
-        command = svc["command"]
-        if command:
-            if isinstance(command, list):
-                cmd_parts.extend(command)
-            else:
-                cmd_parts.extend(command.split())
+        cmd_parts.extend(self._get_service_command(service_name))
 
         log_info(f"Starting service: {service_name} (container: {container_name})")
         log_debug(f"Command: {' '.join(cmd_parts)}")
