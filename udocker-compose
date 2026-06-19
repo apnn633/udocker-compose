@@ -28,11 +28,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -46,27 +49,44 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+__version__ = "0.1.0"
 COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
 STATE_DIR_NAME = ".udocker-compose"
 UDOCKER_BIN = os.environ.get("UDOCKER_COMPOSE_UDOCKER", "udocker")
 EXEC_MODE = os.environ.get("UDOCKER_COMPOSE_EXECMODE", "P1")
+NO_COLOR = os.environ.get("NO_COLOR", "").lower() in ("1", "true", "yes")
 
 # ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
 
+def _strip_ansi(s):
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
 def log_info(msg):
-    print(f"\033[32m[+]\033[0m {msg}")
+    if NO_COLOR:
+        print(f"[+] {msg}")
+    else:
+        print(f"\033[32m[+]\033[0m {msg}")
 
 def log_warn(msg):
-    print(f"\033[33m[!]\033[0m {msg}", file=sys.stderr)
+    if NO_COLOR:
+        print(f"[!] {msg}", file=sys.stderr)
+    else:
+        print(f"\033[33m[!]\033[0m {msg}", file=sys.stderr)
 
 def log_error(msg):
-    print(f"\033[31m[-]\033[0m {msg}", file=sys.stderr)
+    if NO_COLOR:
+        print(f"[-] {msg}", file=sys.stderr)
+    else:
+        print(f"\033[31m[-]\033[0m {msg}", file=sys.stderr)
 
 def log_debug(msg):
     if os.environ.get("UDOCKER_COMPOSE_DEBUG"):
-        print(f"\033[36m[D]\033[0m {msg}", file=sys.stderr)
+        if NO_COLOR:
+            print(f"[D] {msg}", file=sys.stderr)
+        else:
+            print(f"\033[36m[D]\033[0m {msg}", file=sys.stderr)
 
 def run_cmd(cmd, check=True, capture=False, **kwargs):
     """Execute a shell command"""
@@ -106,13 +126,51 @@ class ComposeConfig:
             c if c.isalnum() or c in "-_" else "" for c in self.project_name
         ).lower()
 
+        self.env = self._load_env()
         with open(self.filepath) as f:
-            self.raw = yaml.safe_load(f)
+            raw_text = f.read()
+        raw_text = self._interpolate(raw_text, self.env)
+        self.raw = yaml.safe_load(raw_text)
 
         self.services = {}
         self.networks = {}
         self.volumes = {}
         self._parse()
+
+    def _load_env(self):
+        """Load .env file; os.environ takes precedence."""
+        env = dict(os.environ)
+        env_file = self.project_dir / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    if k not in env:
+                        env[k] = v.strip()
+        return env
+
+    def _interpolate(self, value, env):
+        """Recursively substitute ${VAR} / $VAR in compose values."""
+        if isinstance(value, dict):
+            return {k: self._interpolate(v, env) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._interpolate(v, env) for v in value]
+        if isinstance(value, str):
+            return self._interpolate_string(value, env)
+        return value
+
+    def _interpolate_string(self, s, env):
+        def repl(m):
+            key = m.group(1)
+            default = m.group(2)
+            if key is not None:
+                return env.get(key, default if default is not None else "")
+            return env.get(m.group(3), "")
+        return re.sub(r'\$\{([^}:]+)(?::-([^}]*))?\}|\$(\w+)', repl, s)
 
     def _parse(self):
         raw_services = self.raw.get("services", {})
@@ -222,25 +280,40 @@ class ComposeConfig:
             if isinstance(p, (int, float)):
                 result.append({"host": str(int(p)), "container": str(int(p)), "protocol": "tcp"})
             elif isinstance(p, str):
-                # "8000:8000", "8000:8000/udp", "127.0.0.1:8000:8000"
+                # "8000:8000", "8000:8000/udp", "127.0.0.1:8000:8000", "8000-8010:8000-8010"
                 proto = "tcp"
                 if "/" in p:
                     p, proto = p.rsplit("/", 1)
                 parts = p.split(":")
                 if len(parts) == 1:
-                    result.append({"host": parts[0], "container": parts[0], "protocol": proto})
+                    result.extend(self._expand_port_range(parts[0], parts[0], proto))
                 elif len(parts) == 2:
-                    result.append({"host": parts[0], "container": parts[1], "protocol": proto})
+                    result.extend(self._expand_port_range(parts[0], parts[1], proto))
                 elif len(parts) == 3:
                     # host_ip:host_port:container_port — ignore host_ip
-                    result.append({"host": parts[1], "container": parts[2], "protocol": proto})
+                    result.extend(self._expand_port_range(parts[1], parts[2], proto))
             elif isinstance(p, dict):
-                result.append({
-                    "host": str(p.get("published", p.get("target"))),
-                    "container": str(p.get("target")),
-                    "protocol": p.get("protocol", "tcp"),
-                })
+                result.extend(self._expand_port_range(
+                    str(p.get("published", p.get("target"))),
+                    str(p.get("target")),
+                    p.get("protocol", "tcp"),
+                ))
         return result
+
+    def _expand_port_range(self, host_spec, container_spec, proto):
+        """Expand port ranges like 8000-8010 into individual mappings."""
+        host_ports = self._parse_port_range(host_spec)
+        container_ports = self._parse_port_range(container_spec)
+        if len(host_ports) != len(container_ports):
+            raise ValueError(f"Port range mismatch: {host_spec} vs {container_spec}")
+        return [{"host": h, "container": c, "protocol": proto} for h, c in zip(host_ports, container_ports)]
+
+    def _parse_port_range(self, spec):
+        """Parse '8000' or '8000-8010' into a list of port strings."""
+        if "-" in spec:
+            start, end = spec.split("-", 1)
+            return [str(p) for p in range(int(start), int(end) + 1)]
+        return [spec]
 
     def _normalize_depends(self, deps):
         """Normalize depends_on"""
@@ -302,6 +375,8 @@ class StateManager:
         self.volumes_dir = self.base / "volumes"
         self.network_dir = self.base / "network"
         self.state_file = self.base / "state.json"
+        self.compose_pid_file = self.base / "compose.pid"
+        self._lock = threading.Lock()
 
     def init(self):
         """Create directory structure"""
@@ -311,13 +386,15 @@ class StateManager:
             self._save_state({})
 
     def _load_state(self):
-        try:
-            return json.loads(self.state_file.read_text())
-        except (json.JSONDecodeError, FileNotFoundError):
-            return {}
+        with self._lock:
+            try:
+                return json.loads(self.state_file.read_text())
+            except (json.JSONDecodeError, FileNotFoundError):
+                return {}
 
     def _save_state(self, state):
-        self.state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+        with self._lock:
+            self.state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
     def set_service_state(self, name, **kwargs):
         state = self._load_state()
@@ -341,19 +418,74 @@ class StateManager:
         (self.pids_dir / f"{service_name}.pid").write_text(str(pid))
 
     def get_pid(self, service_name):
-        pidfile = self.pids_dir / f"{service_name}.pid"
-        if pidfile.exists():
-            try:
-                pid = int(pidfile.read_text().strip())
-                # Check if the process is alive
-                os.kill(pid, 0)
-                return pid
-            except (ValueError, ProcessLookupError, PermissionError):
-                pidfile.unlink(missing_ok=True)
-        return None
+        with self._lock:
+            pidfile = self.pids_dir / f"{service_name}.pid"
+            if pidfile.exists():
+                try:
+                    pid = int(pidfile.read_text().strip())
+                    # Check if the process is alive
+                    os.kill(pid, 0)
+                    return pid
+                except (ValueError, ProcessLookupError, PermissionError):
+                    # Try to reap the child and capture its exit code
+                    try:
+                        pid = int(pidfile.read_text().strip())
+                        _, status = os.waitpid(pid, os.WNOHANG)
+                        if status != 0:
+                            exit_code = self._waitstatus_to_exitcode(status)
+                            self._set_last_exit_code_unlocked(service_name, exit_code)
+                    except (ChildProcessError, OSError, ValueError):
+                        pass
+                    pidfile.unlink(missing_ok=True)
+            return None
+
+    @staticmethod
+    def _waitstatus_to_exitcode(status):
+        if hasattr(os, "waitstatus_to_exitcode"):
+            return os.waitstatus_to_exitcode(status)
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            return 128 + os.WTERMSIG(status)
+        return 1
+
+    def _set_last_exit_code_unlocked(self, name, code):
+        try:
+            state = json.loads(self.state_file.read_text())
+        except (json.JSONDecodeError, FileNotFoundError):
+            state = {}
+        if name not in state:
+            state[name] = {}
+        state[name]["last_exit_code"] = code
+        self.state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
     def clear_pid(self, service_name):
         (self.pids_dir / f"{service_name}.pid").unlink(missing_ok=True)
+
+    def get_last_exit_code(self, name):
+        return self._load_state().get(name, {}).get("last_exit_code", 0)
+
+    def clear_last_exit_code(self, name):
+        state = self._load_state()
+        if name in state and "last_exit_code" in state[name]:
+            del state[name]["last_exit_code"]
+            self._save_state(state)
+
+    def save_compose_pid(self, pid):
+        self.compose_pid_file.write_text(str(pid))
+
+    def get_compose_pid(self):
+        if self.compose_pid_file.exists():
+            try:
+                pid = int(self.compose_pid_file.read_text().strip())
+                os.kill(pid, 0)
+                return pid
+            except (ValueError, ProcessLookupError, PermissionError):
+                self.compose_pid_file.unlink(missing_ok=True)
+        return None
+
+    def clear_compose_pid(self):
+        self.compose_pid_file.unlink(missing_ok=True)
 
     def get_log_path(self, service_name):
         return self.logs_dir / f"{service_name}.log"
@@ -586,6 +718,21 @@ class ServiceManager:
         container_name = svc["container_name"]
         args = []
 
+        # Warn about unsupported options that were parsed but cannot be enforced
+        unsupported = []
+        if svc.get("shm_size"):
+            unsupported.append("shm_size")
+        if svc.get("privileged"):
+            unsupported.append("privileged")
+        if svc.get("cap_add"):
+            unsupported.append("cap_add")
+        if svc.get("tmpfs"):
+            unsupported.append("tmpfs")
+        if svc.get("dns"):
+            unsupported.append("dns")
+        for opt in unsupported:
+            log_warn(f"Service '{service_name}' option '{opt}' is not supported by udocker, ignoring")
+
         # Environment variables
         for key, val in svc["environment"].items():
             args.extend(["-e", f"{key}={val}"])
@@ -671,6 +818,7 @@ class ServiceManager:
                 stderr=subprocess.STDOUT,
                 preexec_fn=os.setpgrp,
             )
+            log_file.close()  # Child inherited the fd; parent can close its copy
             self.state.save_pid(service_name, proc.pid)
             self.state.set_service_state(service_name, pid=proc.pid, status="running")
             log_info(f"  -> PID: {proc.pid}, log: {log_path}")
@@ -818,7 +966,6 @@ class RestartSupervisor:
     def start(self):
         """Monitor and restart services in a background thread"""
         self._running = True
-        import threading
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -838,8 +985,14 @@ class RestartSupervisor:
                     svc_state = self.state.get_service_state(name)
                     if svc_state.get("status") == "running":
                         # Process has exited but status is still running — needs restart
-                        if policy in ("always", "unless-stopped"):
+                        last_exit = self.state.get_last_exit_code(name)
+                        if policy == "on-failure" and last_exit == 0:
+                            # Clean exit; mark as stopped so we don't loop
+                            self.state.set_service_state(name, status="stopped")
+                            continue
+                        if policy in ("always", "unless-stopped", "on-failure"):
                             log_info(f"Auto-restarting: {name}")
+                            self.state.clear_last_exit_code(name)
                             self.svc_manager.start(name, detach=True)
 
 
@@ -865,6 +1018,63 @@ class UdockerCompose:
         self.volumes = VolumeManager(self.state, self.config)
         self.svc_mgr = ServiceManager(self.config, self.state, self.network, self.volumes)
         self.supervisor = RestartSupervisor(self.svc_mgr, self.config, self.state)
+        self._shutdown_requested = False
+
+    def _setup_shutdown_handlers(self):
+        """Register SIGTERM/SIGINT handlers for foreground up mode."""
+        def handler(sig, frame):
+            self._shutdown_requested = True
+        signal.signal(signal.SIGTERM, handler)
+        signal.signal(signal.SIGINT, handler)
+
+    def _daemonize(self):
+        """Fork into background and return only in the grandchild process."""
+        try:
+            pid = os.fork()
+            if pid > 0:
+                sys.exit(0)
+        except OSError as e:
+            log_error(f"fork failed: {e}")
+            sys.exit(1)
+
+        os.setsid()
+
+        try:
+            pid = os.fork()
+            if pid > 0:
+                sys.exit(0)
+        except OSError as e:
+            log_error(f"second fork failed: {e}")
+            sys.exit(1)
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+        with open(os.devnull, "r") as f:
+            os.dup2(f.fileno(), sys.stdin.fileno())
+        with open(os.devnull, "a+") as f:
+            os.dup2(f.fileno(), sys.stdout.fileno())
+            os.dup2(f.fileno(), sys.stderr.fileno())
+
+    def _run_daemon_loop(self):
+        """Run by the daemon child after up -d to supervise services."""
+
+        def shutdown_handler(sig, frame):
+            self._shutdown_requested = True
+
+        signal.signal(signal.SIGTERM, shutdown_handler)
+        signal.signal(signal.SIGINT, shutdown_handler)
+
+        self.state.save_compose_pid(os.getpid())
+        self.supervisor.start()
+        try:
+            while not self._shutdown_requested:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.supervisor.stop()
+            self.state.clear_compose_pid()
+            self.cmd_down(remove_volumes=False, stop_daemon=False)
 
     def _filter_services(self, names):
         """Filter by specified service names, or return all if none specified"""
@@ -925,16 +1135,32 @@ class UdockerCompose:
             # Start
             self.svc_mgr.start(name, detach=detach or len(order) > 1)
 
+            # Health check
+            self.svc_mgr.check_health(name)
+
             # Wait briefly for service to start
             time.sleep(1)
 
             print()
 
-        if detach or len(order) > 1:
-            # Start automatic restart monitor
-            self.supervisor.start()
+        if detach:
+            # Daemonize: parent exits, grandchild keeps supervising
+            print()
+            self._print_status_table(order)
+            print()
+            for name in order:
+                svc = self.config.services[name]
+                for port in svc["ports"]:
+                    log_info(f"  {name}: http://localhost:{port['host']}")
+            log_info("Daemonizing...")
+            self._daemonize()
+            self._run_daemon_loop()
+            return
 
-            # Print summary
+        if len(order) > 1:
+            # Foreground multi-service mode
+            self._setup_shutdown_handlers()
+            self.supervisor.start()
             print()
             self._print_status_table(order)
             print()
@@ -945,22 +1171,35 @@ class UdockerCompose:
                 for port in svc["ports"]:
                     log_info(f"  {name}: http://localhost:{port['host']}")
 
-            if not detach:
-                # Foreground mode — wait for all processes
-                log_info("Press Ctrl+C to stop all services")
-                try:
-                    while True:
-                        time.sleep(1)
-                except KeyboardInterrupt:
-                    print()
-                    self.cmd_down()
+            log_info("Press Ctrl+C to stop all services")
+            try:
+                while not self._shutdown_requested:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                self.supervisor.stop()
+                self.cmd_down()
         else:
-            if not detach:
-                # Single service foreground mode
-                self.svc_mgr.start(order[0], detach=False)
+            # Single service foreground mode
+            self.svc_mgr.start(order[0], detach=False)
 
-    def cmd_down(self, remove_volumes=False, services=None):
+    def cmd_down(self, remove_volumes=False, services=None, stop_daemon=True):
         """Stop and remove all services"""
+        if stop_daemon:
+            daemon_pid = self.state.get_compose_pid()
+            if daemon_pid:
+                log_info(f"Stopping compose daemon (PID: {daemon_pid})")
+                try:
+                    os.kill(daemon_pid, signal.SIGTERM)
+                    # Wait for daemon to exit (up to 15 seconds)
+                    for _ in range(30):
+                        if not self.state.get_compose_pid():
+                            break
+                        time.sleep(0.5)
+                except ProcessLookupError:
+                    self.state.clear_compose_pid()
+
         self.supervisor.stop()
         order = self.config.get_startup_order()
         if services:
@@ -974,10 +1213,10 @@ class UdockerCompose:
             for vol_name in self.config.volumes:
                 vol_path = self.state.get_volume_path(vol_name)
                 if vol_path.exists():
-                    import shutil
                     shutil.rmtree(vol_path, ignore_errors=True)
                     log_info(f"  Removed: {vol_name}")
 
+        self.state.clear_compose_pid()
         log_info("All services stopped and cleaned up")
 
     def cmd_ps(self, services=None):
@@ -1002,7 +1241,9 @@ class UdockerCompose:
                 status_colored = f"\033[33m{status}\033[0m"
             else:
                 status_colored = f"\033[90m{status}\033[0m"
-            print(f"{name:<20} {container:<30} {status_colored:<35} {ports}")
+            visible_len = len(_strip_ansi(status_colored))
+            padding = " " * (25 - visible_len)
+            print(f"{name:<20} {container:<30} {status_colored}{padding} {ports}")
 
     def cmd_pull(self, services=None):
         """Pull all images"""
@@ -1063,6 +1304,10 @@ class UdockerCompose:
         names = self._filter_services(services)
         for name in names:
             svc = self.config.services[name]
+            # Create container if it does not exist yet
+            r = udocker("inspect", svc["container_name"], check=False, capture=True)
+            if r.returncode != 0:
+                self.svc_mgr.create(name, force=False)
             self.network.inject_hosts_to_container(svc["container_name"])
             self.svc_mgr.start(name, detach=True)
 
@@ -1195,6 +1440,7 @@ def build_parser():
 
     parser.add_argument("-f", "--file", help="Compose file path")
     parser.add_argument("-p", "--project-name", help="Project name")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sub = parser.add_subparsers(dest="command", help="Subcommands")
 

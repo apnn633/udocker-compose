@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "udocker-compose"
+version = "0.1.0"
+description = "Docker Compose-compatible orchestration for udocker"
+readme = "docs/README.md"
+license = {text = "MIT"}
+requires-python = ">=3.7"
+dependencies = [
+    "pyyaml>=5.0",
+]
+
+[tool.setuptools]
+scripts = ["udocker-compose"]

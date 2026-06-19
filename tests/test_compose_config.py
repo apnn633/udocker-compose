@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import os
 import tempfile
 import textwrap
 import unittest
@@ -79,6 +80,47 @@ class ComposeConfigTest(unittest.TestCase):
 
         config = ComposeConfig(compose_file)
         self.assertEqual(config.get_startup_order(), ["db", "redis", "app"])
+
+    def test_env_interpolation(self):
+        compose_file = self.write_compose(
+            """
+            services:
+              app:
+                image: demo:${TAG:-latest}
+                environment:
+                  - MODE=${MODE}
+                  - STATIC=value
+            """
+        )
+        os.environ["MODE"] = "prod"
+        try:
+            config = ComposeConfig(compose_file)
+            self.assertEqual(config.services["app"]["image"], "demo:latest")
+            self.assertEqual(config.services["app"]["environment"]["MODE"], "prod")
+            self.assertEqual(config.services["app"]["environment"]["STATIC"], "value")
+        finally:
+            os.environ.pop("MODE", None)
+
+    def test_port_range_expansion(self):
+        compose_file = self.write_compose(
+            """
+            services:
+              app:
+                image: demo:latest
+                ports:
+                  - "8000-8002:9000-9002"
+            """
+        )
+
+        config = ComposeConfig(compose_file)
+        self.assertEqual(
+            config.services["app"]["ports"],
+            [
+                {"host": "8000", "container": "9000", "protocol": "tcp"},
+                {"host": "8001", "container": "9001", "protocol": "tcp"},
+                {"host": "8002", "container": "9002", "protocol": "tcp"},
+            ],
+        )
 
 
 if __name__ == "__main__":

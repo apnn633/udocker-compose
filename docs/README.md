@@ -13,12 +13,15 @@ Docker Compose-compatible orchestration for [udocker](https://github.com/indigo-
 ## Features
 
 - Parses `docker-compose.yml` (v2/v3 format) — use your existing compose files as-is
+- Loads `.env` files and interpolates `${VAR}` / `${VAR:-default}` / `$VAR` placeholders
 - Topological dependency resolution (`depends_on`)
 - Service name resolution via `/etc/hosts` injection — no need to rewrite `postgres` to `127.0.0.1` in connection strings
 - Named volume management (mapped to local directories)
 - Background/foreground execution with log management
-- Auto-restart supervision (`restart: always/unless-stopped`) while the current `udocker-compose` process remains alive
+- Auto-restart supervision (`restart: always/unless-stopped/on-failure`); `up -d` daemonizes so supervision persists after the shell returns
 - Health checks
+- Port range support (`8000-8010:8000-8010`)
+- `--version` flag and `NO_COLOR` support
 - Single-file, zero-dependency implementation apart from Python 3 + PyYAML
 
 > **Note:** `udocker` runs all containers directly on the host network — there is **no network isolation** between containers. The `/etc/hosts` injection is purely a convenience feature that maps service names such as `postgres` and `redis` to `127.0.0.1`, so existing compose files work without modification. It does not provide virtual networking or isolation.
@@ -156,6 +159,7 @@ app        myproject_app       running (PID: 1236) 3000->3000/tcp
 | `UDOCKER_COMPOSE_UDOCKER` | `udocker` | Path to the `udocker` binary |
 | `UDOCKER_COMPOSE_EXECMODE` | `P1` | Execution mode (`P1`, `P2`, `F1-F4`, `R1-R3`, `S1`) |
 | `UDOCKER_COMPOSE_DEBUG` | unset | Set to `1` for debug output |
+| `NO_COLOR` | unset | Set to `1`/`true`/`yes` to disable ANSI color output |
 
 ### Execution Modes
 
@@ -184,12 +188,13 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 | `entrypoint` | Supported | |
 | `environment` | Supported | Dict and list format |
 | `env_file` | Supported | |
+| `.env` file | Supported | Loaded from project directory |
 | `volumes` (bind) | Supported | Relative paths resolved |
 | `volumes` (named) | Supported | Stored in `.udocker-compose/volumes/` |
-| `ports` | Supported | Pn mode only, host network |
+| `ports` | Supported | Pn mode only, host network; ranges expanded |
 | `depends_on` | Supported | Topological sort |
-| `restart` | Supported | `always`, `unless-stopped` |
-| `healthcheck` | Supported | `CMD`, `CMD-SHELL` |
+| `restart` | Supported | `always`, `unless-stopped`, `on-failure` |
+| `healthcheck` | Supported | `CMD`, `CMD-SHELL`; evaluated during `up` |
 | `networks` | Partial | No isolation; service names map to `127.0.0.1` via `/etc/hosts` |
 | `container_name` | Supported | |
 | `hostname` | Supported | Via environment variable |
@@ -221,6 +226,7 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 ```text
 .udocker-compose/
   ├── state.json          # Service state tracking
+  ├── compose.pid         # Daemonized up -d process
   ├── pids/               # PID files for running services
   │   ├── redis.pid
   │   └── postgres.pid
@@ -235,7 +241,11 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 
 ## Restart Behavior
 
-`restart: always` and `restart: unless-stopped` are implemented by an in-process background supervisor thread. They are not backed by a persistent daemon, so restart behavior only applies while the current `udocker-compose` process remains alive.
+`restart: always`, `restart: unless-stopped`, and `restart: on-failure` are implemented by a background supervisor thread.
+
+- In foreground `up` mode, supervision lasts until you stop the CLI.
+- In `up -d` mode, the CLI daemonizes into a background process and writes its PID to `.udocker-compose/compose.pid`, so supervision continues after the shell prompt returns.
+- `down` stops the daemon (if running) and removes the services.
 
 ## Platform Notes
 

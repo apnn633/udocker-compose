@@ -13,12 +13,15 @@
 ## 功能特性
 
 - 解析 `docker-compose.yml`（v2/v3 格式）—— 直接使用现有 Compose 文件
+- 加载 `.env` 文件并插值 `${VAR}` / `${VAR:-default}` / `$VAR` 占位符
 - 基于拓扑排序的依赖解析（`depends_on`）
 - 通过注入 `/etc/hosts` 实现服务名解析 —— 无需把连接串中的 `postgres` 改成 `127.0.0.1`
 - 命名卷管理（映射为本地目录）
 - 支持前台/后台运行与日志管理
-- 自动重启监控（`restart: always/unless-stopped`），仅在当前 `udocker-compose` 进程存活期间生效
+- 自动重启监控（`restart: always/unless-stopped/on-failure`）；`up -d` 会以守护进程模式运行，退出 shell 后仍持续监控
 - 健康检查
+- 端口范围支持（`8000-8010:8000-8010`）
+- `--version` 参数与 `NO_COLOR` 支持
 - 单文件实现，除 Python 3 + PyYAML 外无额外依赖
 
 > **注意：** `udocker` 中所有容器都直接运行在宿主机网络上，**没有任何网络隔离**。注入 `/etc/hosts` 只是一个兼容性便利功能：把 `postgres`、`redis` 等服务名映射到 `127.0.0.1`，从而让现有 Compose 文件无需修改即可运行。它不提供虚拟网络，也不提供隔离。
@@ -156,6 +159,7 @@ app        myproject_app       running (PID: 1236) 3000->3000/tcp
 | `UDOCKER_COMPOSE_UDOCKER` | `udocker` | `udocker` 可执行文件路径 |
 | `UDOCKER_COMPOSE_EXECMODE` | `P1` | 执行模式（`P1`、`P2`、`F1-F4`、`R1-R3`、`S1`） |
 | `UDOCKER_COMPOSE_DEBUG` | 未设置 | 设为 `1` 以启用调试输出 |
+| `NO_COLOR` | 未设置 | 设为 `1`/`true`/`yes` 禁用 ANSI 颜色输出 |
 
 ### 执行模式
 
@@ -184,12 +188,13 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 | `entrypoint` | 支持 | |
 | `environment` | 支持 | 支持 dict 和 list 两种格式 |
 | `env_file` | 支持 | |
+| `.env` 文件 | 支持 | 从项目目录加载 |
 | `volumes`（bind） | 支持 | 相对路径会自动解析 |
 | `volumes`（named） | 支持 | 存储在 `.udocker-compose/volumes/` |
-| `ports` | 支持 | 仅 Pn 模式，且使用宿主机网络 |
+| `ports` | 支持 | 仅 Pn 模式，使用宿主机网络；支持范围 |
 | `depends_on` | 支持 | 通过拓扑排序处理 |
-| `restart` | 支持 | `always`、`unless-stopped` |
-| `healthcheck` | 支持 | `CMD`、`CMD-SHELL` |
+| `restart` | 支持 | `always`、`unless-stopped`、`on-failure` |
+| `healthcheck` | 支持 | `CMD`、`CMD-SHELL`；在 `up` 时执行 |
 | `networks` | 部分支持 | 无隔离；服务名通过 `/etc/hosts` 映射到 `127.0.0.1` |
 | `container_name` | 支持 | |
 | `hostname` | 支持 | 通过环境变量传递 |
@@ -221,6 +226,7 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 ```text
 .udocker-compose/
   ├── state.json          # 服务状态跟踪
+  ├── compose.pid         # up -d 守护进程
   ├── pids/               # 运行中服务的 PID 文件
   │   ├── redis.pid
   │   └── postgres.pid
@@ -235,7 +241,11 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 
 ## 重启行为说明
 
-`restart: always` 和 `restart: unless-stopped` 是通过当前进程内的后台监控线程实现的，并不是持久化守护进程。因此，自动重启行为只在当前 `udocker-compose` 进程存活期间有效。
+`restart: always`、`restart: unless-stopped` 和 `restart: on-failure` 由后台监控线程实现。
+
+- 在前台 `up` 模式下，监控持续到用户停止 CLI 为止。
+- 在 `up -d` 模式下，CLI 会守护进程化并将 PID 写入 `.udocker-compose/compose.pid`，因此退出 shell 后仍会持续监控。
+- `down` 会停止守护进程（如果正在运行）并移除服务。
 
 ## 平台说明
 
