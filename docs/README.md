@@ -13,18 +13,28 @@ Docker Compose-compatible orchestration for [udocker](https://github.com/indigo-
 ## Features
 
 - Parses `docker-compose.yml` (v2/v3 format) — use your existing compose files as-is
-- Loads `.env` files and interpolates `${VAR}` / `${VAR:-default}` / `$VAR` placeholders
+- Supports **multiple compose files** (`-f base.yml -f override.yml`) and the `COMPOSE_FILE` environment variable
+- Loads `.env` files, supports `--env-file`, and interpolates `${VAR}` / `${VAR:-default}` / `$VAR` placeholders
+- **Profiles** support (`--profile` / `COMPOSE_PROFILES`)
 - Topological dependency resolution (`depends_on`)
 - Service name resolution via `/etc/hosts` injection — no need to rewrite `postgres` to `127.0.0.1` in connection strings
 - Named volume management (mapped to local directories)
 - Background/foreground execution with log management
 - Auto-restart supervision (`restart: always/unless-stopped/on-failure`); `up -d` daemonizes so supervision persists after the shell returns
 - Health checks
+- Graceful stop using `stop_signal` and `stop_grace_period`
 - Port range support (`8000-8010:8000-8010`)
-- `--version` flag and `NO_COLOR` support
+- Secrets / configs mapped to bind mounts or environment variables
+- `--no-deps` for `up` / `start`
+- `--project-directory` and `--ansi` global options
+- `cp`, `rm`, `create`, `pause`, `unpause`, `events` commands
+- `depends_on` conditions (`service_healthy`)
+- `--version` flag, `--ansi`, and `NO_COLOR` support
 - Single-file, zero-dependency implementation apart from Python 3 + PyYAML
 
 > **Note:** `udocker` runs all containers directly on the host network — there is **no network isolation** between containers. The `/etc/hosts` injection is purely a convenience feature that maps service names such as `postgres` and `redis` to `127.0.0.1`, so existing compose files work without modification. It does not provide virtual networking or isolation.
+>
+> Many advanced Docker Compose options (`cap_add`, `privileged`, `shm_size`, `ulimits`, `logging`, `network_mode`, `platform`, `runtime`, `init`, `dns`, `read_only`, etc.) are parsed for compatibility but cannot be enforced by udocker and are ignored with a warning.
 
 ## Quick Start
 
@@ -83,17 +93,27 @@ udocker-compose down -v        # Also remove named volumes
 
 | Command | Description |
 |---------|-------------|
-| `up [-d] [service...]` | Create and start services. `-d` runs in background |
-| `down [-v]` | Stop and remove containers. `-v` also removes named volumes |
+| `up [-d] [--no-deps] [--no-recreate] [--remove-orphans] [--abort-on-container-exit] [--exit-code-from] [service...]` | Create and start services |
+| `down [-v] [--rmi] [service...]` | Stop and remove containers/volumes/images |
 | `ps [service...]` | List service status |
-| `pull [service...]` | Pull service images |
-| `logs [-f] [-n N] [service...]` | View logs. `-f` follows output |
+| `pull [--ignore-pull-failures] [service...]` | Pull service images |
+| `logs [-f] [-n N] [-t] [service...]` | View logs |
 | `restart [service...]` | Restart services |
 | `stop [service...]` | Stop services without removing containers |
-| `start [service...]` | Start stopped services |
+| `start [--no-deps] [service...]` | Start stopped services |
 | `exec <service> <cmd>` | Execute a command in a service container |
 | `run [--rm] <service> <cmd>` | Run a one-off command |
-| `config` | Validate and display parsed configuration |
+| `kill [-s SIGNAL] [service...]` | Send a signal to running services |
+| `top [service...]` | Show running processes |
+| `images` | List images used by services |
+| `port <service> [private_port]` | Show port mappings |
+| `cp HOST_PATH SERVICE:PATH` | Copy files between host and container |
+| `rm [-s] [-f] [-v] [service...]` | Remove stopped containers |
+| `create [service...]` | Create containers without starting |
+| `pause [service...]` | Pause services |
+| `unpause [service...]` | Unpause services |
+| `events [service...]` | Stream service state events |
+| `config [--services] [--volumes]` | Validate and display parsed configuration |
 
 ## Service Name Resolution
 
@@ -182,6 +202,8 @@ app        myproject_app       running (PID: 1236) 3000->3000/tcp
 | `UDOCKER_COMPOSE_EXECMODE` | `P1` | Execution mode (`P1`, `P2`, `F1-F4`, `R1-R3`, `S1`) |
 | `UDOCKER_COMPOSE_DEBUG` | unset | Set to `1` for debug output |
 | `NO_COLOR` | unset | Set to `1`/`true`/`yes` to disable ANSI color output |
+| `COMPOSE_FILE` | unset | Colon-separated list of compose files |
+| `COMPOSE_PROFILES` | unset | Comma-separated list of enabled profiles |
 
 ### Execution Modes
 
@@ -227,7 +249,15 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 | `devices` | Partial | Rn mode only |
 | `shm_size` | Not supported | |
 | `privileged` | Not supported | No real root |
-| `cap_add` | Not supported | |
+| `cap_add` / `cap_drop` | Not supported | |
+| `init` | Not supported | |
+| `ulimits` | Not supported | |
+| `logging` | Not supported | |
+| `network_mode` | Not supported | |
+| `platform` | Not supported | |
+| `runtime` | Not supported | |
+| `read_only` | Not supported | |
+| `external_links` | Partial | Aliased to `127.0.0.1` in `/etc/hosts` |
 
 ## Comparison with Docker Compose
 
@@ -241,7 +271,10 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 | Named volumes | Managed by Docker | Local directories |
 | Restart policy | `dockerd` supervises | Background thread |
 | Service scaling | `--scale` | Not supported |
-| Compose profiles | Supported | Not supported |
+| Compose profiles | Supported | Supported |
+| depends_on conditions | `service_healthy` / `service_completed_successfully` | `service_healthy` supported; `service_completed_successfully` ignored |
+| Copy files | `cp` | Supported via container rootfs |
+| Pause/unpause | `pause` / `unpause` | Supported via SIGSTOP/SIGCONT |
 
 ## State Directory
 

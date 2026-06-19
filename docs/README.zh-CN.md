@@ -20,11 +20,21 @@
 - 支持前台/后台运行与日志管理
 - 自动重启监控（`restart: always/unless-stopped/on-failure`）；`up -d` 会以守护进程模式运行，退出 shell 后仍持续监控
 - 健康检查
+- 优雅停止（`stop_signal`、`stop_grace_period`）
 - 端口范围支持（`8000-8010:8000-8010`）
-- `--version` 参数与 `NO_COLOR` 支持
+- Secrets / configs 映射为 bind mount 或环境变量
+- 多 Compose 文件合并（`-f base.yml -f override.yml`）与 `COMPOSE_FILE` 环境变量
+- Profiles 支持（`--profile`、`COMPOSE_PROFILES`）
+- `up` / `start` 支持 `--no-deps`
+- `--project-directory` 与 `--ansi` 全局选项
+- `cp`、`rm`、`create`、`pause`、`unpause`、`events` 命令
+- `depends_on` 条件（`service_healthy`）
+- `--version` 参数、`--ansi` 与 `NO_COLOR` 支持
 - 单文件实现，除 Python 3 + PyYAML 外无额外依赖
 
 > **注意：** `udocker` 中所有容器都直接运行在宿主机网络上，**没有任何网络隔离**。注入 `/etc/hosts` 只是一个兼容性便利功能：把 `postgres`、`redis` 等服务名映射到 `127.0.0.1`，从而让现有 Compose 文件无需修改即可运行。它不提供虚拟网络，也不提供隔离。
+>
+> 许多高级 Docker Compose 选项（`cap_add`、`privileged`、`shm_size`、`ulimits`、`logging`、`network_mode`、`platform`、`runtime`、`init`、`dns`、`read_only` 等）会被解析以保证兼容性，但由于 udocker 无法强制执行，将以警告形式忽略。
 
 ## 快速开始
 
@@ -83,17 +93,27 @@ udocker-compose down -v        # 同时删除命名卷
 
 | 命令 | 说明 |
 |------|------|
-| `up [-d] [service...]` | 创建并启动服务，`-d` 表示后台运行 |
-| `down [-v]` | 停止并删除容器，`-v` 同时删除命名卷 |
+| `up [-d] [--no-deps] [--no-recreate] [--remove-orphans] [--abort-on-container-exit] [--exit-code-from] [service...]` | 创建并启动服务 |
+| `down [-v] [--rmi] [service...]` | 停止并删除容器/卷/镜像 |
 | `ps [service...]` | 查看服务状态 |
-| `pull [service...]` | 拉取服务镜像 |
-| `logs [-f] [-n N] [service...]` | 查看日志，`-f` 表示持续跟踪 |
+| `pull [--ignore-pull-failures] [service...]` | 拉取服务镜像 |
+| `logs [-f] [-n N] [-t] [service...]` | 查看日志 |
 | `restart [service...]` | 重启服务 |
 | `stop [service...]` | 停止服务但不删除容器 |
-| `start [service...]` | 启动已停止的服务 |
+| `start [--no-deps] [service...]` | 启动已停止的服务 |
 | `exec <service> <cmd>` | 在服务容器中执行命令 |
 | `run [--rm] <service> <cmd>` | 运行一次性命令 |
-| `config` | 校验并展示解析后的配置 |
+| `kill [-s SIGNAL] [service...]` | 向运行中服务发送信号 |
+| `top [service...]` | 查看运行中的进程 |
+| `images` | 列出服务使用的镜像 |
+| `port <service> [private_port]` | 查看端口映射 |
+| `cp HOST_PATH SERVICE:PATH` | 在宿主机与容器之间复制文件 |
+| `rm [-s] [-f] [-v] [service...]` | 删除已停止的容器 |
+| `create [service...]` | 仅创建容器，不启动 |
+| `pause [service...]` | 暂停服务 |
+| `unpause [service...]` | 恢复暂停的服务 |
+| `events [service...]` | 实时流式显示服务状态事件 |
+| `config [--services] [--volumes]` | 校验并展示解析后的配置 |
 
 ## 服务名解析原理
 
@@ -182,6 +202,8 @@ app        myproject_app       running (PID: 1236) 3000->3000/tcp
 | `UDOCKER_COMPOSE_EXECMODE` | `P1` | 执行模式（`P1`、`P2`、`F1-F4`、`R1-R3`、`S1`） |
 | `UDOCKER_COMPOSE_DEBUG` | 未设置 | 设为 `1` 以启用调试输出 |
 | `NO_COLOR` | 未设置 | 设为 `1`/`true`/`yes` 禁用 ANSI 颜色输出 |
+| `COMPOSE_FILE` | 未设置 | 冒号分隔的 Compose 文件列表 |
+| `COMPOSE_PROFILES` | 未设置 | 逗号分隔的启用的 profile 列表 |
 
 ### 执行模式
 
@@ -227,7 +249,15 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 | `devices` | 部分支持 | 仅 Rn 模式 |
 | `shm_size` | 不支持 | |
 | `privileged` | 不支持 | 无真实 root |
-| `cap_add` | 不支持 | |
+| `cap_add` / `cap_drop` | 不支持 | |
+| `init` | 不支持 | |
+| `ulimits` | 不支持 | |
+| `logging` | 不支持 | |
+| `network_mode` | 不支持 | |
+| `platform` | 不支持 | |
+| `runtime` | 不支持 | |
+| `read_only` | 不支持 | |
+| `external_links` | 部分支持 | 在 `/etc/hosts` 中映射为 `127.0.0.1` |
 
 ## 与 Docker Compose 的对比
 
@@ -241,7 +271,10 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 | 命名卷 | Docker 管理 | 本地目录 |
 | 重启策略 | `dockerd` 负责监控 | 后台线程监控 |
 | 服务扩容 | `--scale` | 不支持 |
-| Compose profiles | 支持 | 不支持 |
+| Compose profiles | 支持 | 支持 |
+| depends_on 条件 | `service_healthy` / `service_completed_successfully` | 支持 `service_healthy`；忽略 `service_completed_successfully` |
+| 复制文件 | `cp` | 通过容器 rootfs 支持 |
+| 暂停/恢复 | `pause` / `unpause` | 通过 SIGSTOP/SIGCONT 支持 |
 
 ## 状态目录
 

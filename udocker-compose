@@ -110,6 +110,21 @@ def find_compose_file(directory="."):
             return p
     return None
 
+def parse_duration(s):
+    """Parse a Docker duration string (10s, 1m, 500ms)"""
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = str(s).strip()
+    if s.endswith("ms"):
+        return float(s[:-2]) / 1000
+    elif s.endswith("s"):
+        return float(s[:-1])
+    elif s.endswith("m"):
+        return float(s[:-1]) * 60
+    elif s.endswith("h"):
+        return float(s[:-1]) * 3600
+    return float(s)
+
 # ---------------------------------------------------------------------------
 # YAML parsing and normalization
 # ---------------------------------------------------------------------------
@@ -117,40 +132,75 @@ def find_compose_file(directory="."):
 class ComposeConfig:
     """Parse and normalize docker-compose.yml"""
 
-    def __init__(self, filepath, project_name=None):
-        self.filepath = Path(filepath).resolve()
-        self.project_dir = self.filepath.parent
+    def __init__(self, filepaths, project_name=None, profiles=None, env_overrides=None,
+                 project_directory=None):
+        # Accept a single path or a list of paths
+        if isinstance(filepaths, (str, Path)):
+            filepaths = [filepaths]
+        self.filepaths = [Path(p).resolve() for p in filepaths if p]
+        if not self.filepaths:
+            raise ValueError("At least one compose file path is required")
+        self.filepath = self.filepaths[0]
+        self.project_dir = Path(project_directory).resolve() if project_directory else self.filepath.parent
         self.project_name = project_name or self.project_dir.name
         # Normalize project name: keep only alphanumeric characters and hyphens
         self.project_name = "".join(
             c if c.isalnum() or c in "-_" else "" for c in self.project_name
         ).lower()
 
-        self.env = self._load_env()
-        with open(self.filepath) as f:
-            raw_text = f.read()
-        raw_text = self._interpolate(raw_text, self.env)
-        self.raw = yaml.safe_load(raw_text)
+        self.profiles = set(profiles or [])
+        self.env = self._load_env(extra_files=env_overrides)
+
+        # Merge multiple compose files in order
+        merged = {}
+        for fp in self.filepaths:
+            with open(fp) as f:
+                raw_text = f.read()
+            raw_text = self._interpolate(raw_text, self.env)
+            doc = yaml.safe_load(raw_text) or {}
+            merged = self._merge_docs(merged, doc)
+        self.raw = merged
 
         self.services = {}
         self.networks = {}
         self.volumes = {}
+        self.secrets = self.raw.get("secrets", {})
+        self.configs = self.raw.get("configs", {})
         self._parse()
 
-    def _load_env(self):
+    @staticmethod
+    def _merge_docs(base, override):
+        """Deep-merge two compose documents (override wins)."""
+        if not isinstance(base, dict) or not isinstance(override, dict):
+            return override
+        result = dict(base)
+        for key, val in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+                result[key] = ComposeConfig._merge_docs(result[key], val)
+            elif key in result and isinstance(result[key], list) and isinstance(val, list):
+                result[key] = result[key] + val
+            else:
+                result[key] = val
+        return result
+
+    def _load_env(self, extra_files=None):
         """Load .env file; os.environ takes precedence."""
         env = dict(os.environ)
-        env_file = self.project_dir / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    if k not in env:
-                        env[k] = v.strip()
+        env_files = [self.project_dir / ".env"]
+        if extra_files:
+            for ef in extra_files:
+                env_files.append(Path(ef).expanduser().resolve())
+        for env_file in env_files:
+            if env_file.exists():
+                for line in env_file.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        if k not in env:
+                            env[k] = v.strip()
         return env
 
     def _interpolate(self, value, env):
@@ -181,7 +231,14 @@ class ComposeConfig:
         self.volumes = self.raw.get("volumes", {})
 
         for name, svc_def in raw_services.items():
+            svc_profiles = self._normalize_list(svc_def.get("profiles"))
+            if svc_profiles and not (self.profiles & set(svc_profiles)):
+                # Profiled service not enabled
+                continue
             self.services[name] = self._normalize_service(name, svc_def)
+
+        if not self.services:
+            raise ValueError("No services definition found in compose file")
 
     def _normalize_service(self, name, svc):
         """Normalize a compose service definition into internal format"""
@@ -196,20 +253,41 @@ class ComposeConfig:
             "env_file": self._normalize_list(svc.get("env_file")),
             "volumes": self._normalize_volumes(svc.get("volumes", [])),
             "ports": self._normalize_ports(svc.get("ports", [])),
+            "expose": self._normalize_list(svc.get("expose", [])),
             "depends_on": self._normalize_depends(svc.get("depends_on")),
             "networks": self._normalize_list(svc.get("networks")) or list(self.networks.keys()) or ["default"],
             "restart": svc.get("restart", "no"),
             "user": svc.get("user"),
             "working_dir": svc.get("working_dir"),
             "hostname": svc.get("hostname", name),
+            "labels": self._normalize_labels(svc.get("labels")),
+            "stop_signal": svc.get("stop_signal", "SIGTERM"),
+            "stop_grace_period": parse_duration(svc.get("stop_grace_period", "10s")),
             "healthcheck": svc.get("healthcheck"),
             "shm_size": svc.get("shm_size"),
             "extra_hosts": self._normalize_list(svc.get("extra_hosts")),
             "dns": self._normalize_list(svc.get("dns")),
+            "dns_search": self._normalize_list(svc.get("dns_search")),
             "tmpfs": self._normalize_list(svc.get("tmpfs")),
             "privileged": svc.get("privileged", False),
             "devices": self._normalize_list(svc.get("devices")),
             "cap_add": self._normalize_list(svc.get("cap_add")),
+            "cap_drop": self._normalize_list(svc.get("cap_drop")),
+            "group_add": self._normalize_list(svc.get("group_add")),
+            "init": svc.get("init", False),
+            "ulimits": svc.get("ulimits"),
+            "logging": svc.get("logging"),
+            "network_mode": svc.get("network_mode"),
+            "external_links": self._normalize_list(svc.get("external_links")),
+            "platform": svc.get("platform"),
+            "stdin_open": svc.get("stdin_open", False),
+            "tty": svc.get("tty", False),
+            "read_only": svc.get("read_only", False),
+            "runtime": svc.get("runtime"),
+            "domainname": svc.get("domainname"),
+            "secrets": self._normalize_secrets_or_configs(svc.get("secrets", [])),
+            "configs": self._normalize_secrets_or_configs(svc.get("configs", [])),
+            "profiles": self._normalize_list(svc.get("profiles")),
         }
 
         # Error if neither image nor build is specified
@@ -252,6 +330,35 @@ class ComposeConfig:
         if isinstance(val, str):
             return [val]
         return list(val)
+
+    def _normalize_labels(self, labels):
+        """Normalize labels into a dict."""
+        if labels is None:
+            return {}
+        if isinstance(labels, dict):
+            return {k: str(v) for k, v in labels.items()}
+        result = {}
+        for item in labels:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                result[k.strip()] = v.strip()
+            else:
+                result[item.strip()] = ""
+        return result
+
+    def _normalize_secrets_or_configs(self, items):
+        """Normalize secrets/configs references into {name, target, mode}."""
+        result = []
+        for item in items:
+            if isinstance(item, str):
+                result.append({"name": item, "target": None, "mode": "0444"})
+            elif isinstance(item, dict):
+                result.append({
+                    "name": item.get("source", item.get("name")),
+                    "target": item.get("target"),
+                    "mode": item.get("mode", "0444"),
+                })
+        return result
 
     def _normalize_volumes(self, vols):
         """Normalize volumes into a [{host, container, mode}] list"""
@@ -316,14 +423,19 @@ class ComposeConfig:
         return [spec]
 
     def _normalize_depends(self, deps):
-        """Normalize depends_on"""
+        """Normalize depends_on into [{name, condition}]"""
         if deps is None:
             return []
         if isinstance(deps, list):
-            return deps
+            return [{"name": d, "condition": "service_started"} for d in deps]
         if isinstance(deps, dict):
-            # v2/v3 with condition
-            return list(deps.keys())
+            result = []
+            for name, val in deps.items():
+                condition = "service_started"
+                if isinstance(val, dict):
+                    condition = val.get("condition", "service_started")
+                result.append({"name": name, "condition": condition})
+            return result
         return []
 
     def get_service_names(self):
@@ -338,9 +450,10 @@ class ComposeConfig:
         for name, svc in self.services.items():
             in_degree.setdefault(name, 0)
             for dep in svc["depends_on"]:
-                if dep not in all_services:
-                    raise ValueError(f"Service '{name}' depends on non-existent service '{dep}'")
-                graph[dep].add(name)
+                dep_name = dep["name"]
+                if dep_name not in all_services:
+                    raise ValueError(f"Service '{name}' depends on non-existent service '{dep_name}'")
+                graph[dep_name].add(name)
                 in_degree[name] += 1
 
         queue = [s for s in all_services if in_degree[s] == 0]
@@ -358,6 +471,14 @@ class ComposeConfig:
             raise ValueError("Circular dependency detected!")
 
         return order
+
+    def get_depends_on(self, service_name):
+        """Return depends_on entries as [{name, condition}]."""
+        return self.services.get(service_name, {}).get("depends_on", [])
+
+    def get_depends_on_names(self, service_name):
+        """Return list of dependency service names."""
+        return [d["name"] for d in self.get_depends_on(service_name)]
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +657,13 @@ class NetworkManager:
         names_str = "\t".join(sorted(service_names))
         lines.append(f"127.0.0.1\t{names_str}")
 
+        # Add external_links aliases (share host network, so map to localhost)
+        for name, svc in self.config.services.items():
+            for link in svc.get("external_links", []):
+                alias = link.split(":", 1)[-1].strip() if ":" in link else link.strip()
+                if alias:
+                    lines.append(f"127.0.0.1\t{alias}")
+
         # Add extra_hosts
         for name, svc in self.config.services.items():
             for host_entry in svc.get("extra_hosts", []):
@@ -642,7 +770,7 @@ class ServiceManager:
         self.network = network
         self.volumes = volumes
 
-    def pull(self, service_name):
+    def pull(self, service_name, ignore_failures=False):
         """Pull a service image"""
         svc = self.config.services[service_name]
         image = svc["image"]
@@ -654,6 +782,9 @@ class ServiceManager:
         log_info(f"Pulling image: {image}")
         r = udocker("pull", image, check=False)
         if r.returncode != 0:
+            if ignore_failures:
+                log_warn(f"Failed to pull {image}, ignoring")
+                return True
             log_error(f"Failed to pull {image}")
             return False
         return True
@@ -712,6 +843,47 @@ class ServiceManager:
             return entrypoint[1:] + command
         return command
 
+    def _resolve_secret_or_config(self, name, kind):
+        """Resolve a secret/config definition to a host file path."""
+        if kind == "secret":
+            definitions = self.config.secrets
+        else:
+            definitions = self.config.configs
+        definition = definitions.get(name, {})
+        if "file" in definition:
+            src = Path(definition["file"]).expanduser()
+            if not src.is_absolute():
+                src = self.config.project_dir / src
+            return src if src.exists() else None
+        if "environment" in definition:
+            return None
+        # Fallback: look for a local file named <name> in ./secrets or ./configs
+        fallback = self.config.project_dir / ("secrets" if kind == "secret" else "configs") / name
+        return fallback if fallback.exists() else None
+
+    def _get_secrets_and_configs_args(self, service_name):
+        """Map secrets/configs references to bind mounts or env vars."""
+        svc = self.config.services[service_name]
+        args = []
+        for item in svc["secrets"]:
+            src = self._resolve_secret_or_config(item["name"], "secret")
+            target = item["target"] or f"/run/secrets/{item['name']}"
+            if src:
+                args.extend(["--volume", f"{src}:{target}"])
+            else:
+                # If only environment is defined, expose as env var
+                definition = self.config.secrets.get(item["name"], {})
+                if "environment" in definition:
+                    env_name = definition["environment"]
+                    value = os.environ.get(env_name, "")
+                    args.extend(["-e", f"{env_name}={value}"])
+        for item in svc["configs"]:
+            src = self._resolve_secret_or_config(item["name"], "config")
+            target = item["target"] or f"/{item['name']}"
+            if src:
+                args.extend(["--volume", f"{src}:{target}"])
+        return args
+
     def _build_run_args(self, service_name, extra_args=None):
         """Build the full argument list for udocker run"""
         svc = self.config.services[service_name]
@@ -720,16 +892,12 @@ class ServiceManager:
 
         # Warn about unsupported options that were parsed but cannot be enforced
         unsupported = []
-        if svc.get("shm_size"):
-            unsupported.append("shm_size")
-        if svc.get("privileged"):
-            unsupported.append("privileged")
-        if svc.get("cap_add"):
-            unsupported.append("cap_add")
-        if svc.get("tmpfs"):
-            unsupported.append("tmpfs")
-        if svc.get("dns"):
-            unsupported.append("dns")
+        for opt in ("shm_size", "privileged", "cap_add", "cap_drop", "dns",
+                    "dns_search", "labels", "init", "ulimits", "logging",
+                    "network_mode", "platform", "read_only", "runtime",
+                    "group_add", "tmpfs"):
+            if svc.get(opt):
+                unsupported.append(opt)
         for opt in unsupported:
             log_warn(f"Service '{service_name}' option '{opt}' is not supported by udocker, ignoring")
 
@@ -764,8 +932,11 @@ class ServiceManager:
         if svc["user"]:
             args.extend(["--user", str(svc["user"])])
 
-        # Hostname (passed via environment variable, hostname command may not be reliable under PRoot)
+        # Hostname (udocker does not support --hostname; use environment variable instead)
         args.extend(["-e", f"HOSTNAME={svc['hostname']}"])
+
+        # Secrets / configs as bind mounts
+        args.extend(self._get_secrets_and_configs_args(service_name))
 
         # entrypoint
         raw_entrypoint, entrypoint, _ = self._get_entrypoint_and_command(service_name)
@@ -831,19 +1002,32 @@ class ServiceManager:
             except KeyboardInterrupt:
                 return False
 
-    def stop(self, service_name, timeout=10):
-        """Stop a service"""
+    @staticmethod
+    def _signal_name_to_number(name):
+        """Convert SIGTERM to signal.SIGTERM, fallback to int(name)."""
+        if isinstance(name, int):
+            return name
+        name = str(name).upper()
+        if not name.startswith("SIG"):
+            name = "SIG" + name
+        return getattr(signal, name, signal.SIGTERM)
+
+    def stop(self, service_name, timeout=None):
+        """Stop a service gracefully using its configured stop_signal and stop_grace_period."""
         pid = self.state.get_pid(service_name)
         if not pid:
             log_info(f"Service '{service_name}' is not running")
             return True
 
-        log_info(f"Stopping service: {service_name} (PID: {pid})")
+        svc = self.config.services[service_name]
+        stop_signal = self._signal_name_to_number(svc["stop_signal"])
+        timeout = timeout if timeout is not None else svc["stop_grace_period"]
+
+        log_info(f"Stopping service: {service_name} (PID: {pid}, signal: {svc['stop_signal']})")
         try:
-            # Send SIGTERM first
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            os.killpg(os.getpgid(pid), stop_signal)
             # Wait for exit
-            for _ in range(timeout * 10):
+            for _ in range(int(timeout * 10)):
                 try:
                     os.kill(pid, 0)
                     time.sleep(0.1)
@@ -851,7 +1035,7 @@ class ServiceManager:
                     break
             else:
                 # Timeout, force kill
-                log_warn(f"Service '{service_name}' did not respond to SIGTERM, sending SIGKILL")
+                log_warn(f"Service '{service_name}' did not respond to {svc['stop_signal']}, sending SIGKILL")
                 try:
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
@@ -895,10 +1079,10 @@ class ServiceManager:
         if not test:
             return True
 
-        interval = self._parse_duration(hc.get("interval", "30s"))
-        hc_timeout = self._parse_duration(hc.get("timeout", "10s"))
+        interval = parse_duration(hc.get("interval", "30s"))
+        hc_timeout = parse_duration(hc.get("timeout", "10s"))
         retries = hc.get("retries", 3)
-        start_period = self._parse_duration(hc.get("start_period", "0s"))
+        start_period = parse_duration(hc.get("start_period", "0s"))
 
         container_name = svc["container_name"]
 
@@ -933,21 +1117,6 @@ class ServiceManager:
         log_warn(f"Health check failed: {service_name} (after {retries} retries)")
         return False
 
-    @staticmethod
-    def _parse_duration(s):
-        """Parse a Docker duration string (10s, 1m, 500ms)"""
-        if isinstance(s, (int, float)):
-            return float(s)
-        s = str(s).strip()
-        if s.endswith("ms"):
-            return float(s[:-2]) / 1000
-        elif s.endswith("s"):
-            return float(s[:-1])
-        elif s.endswith("m"):
-            return float(s[:-1]) * 60
-        elif s.endswith("h"):
-            return float(s[:-1]) * 3600
-        return float(s)
 
 
 # ---------------------------------------------------------------------------
@@ -1003,16 +1172,46 @@ class RestartSupervisor:
 class UdockerCompose:
     """Main entry point: parse commands and execute orchestration"""
 
-    def __init__(self, compose_file=None, project_name=None):
-        if compose_file:
-            self.compose_file = Path(compose_file)
-        else:
-            self.compose_file = find_compose_file()
-            if not self.compose_file:
-                log_error(f"Compose file not found. Supported filenames: {', '.join(COMPOSE_FILES)}")
-                sys.exit(1)
+    def __init__(self, compose_files=None, project_name=None, profiles=None, env_files=None,
+                 project_directory=None):
+        self.compose_files = []
+        base_dir = Path(project_directory) if project_directory else None
 
-        self.config = ComposeConfig(self.compose_file, project_name)
+        if compose_files:
+            self.compose_files = [Path(f) for f in compose_files]
+            if base_dir:
+                self.compose_files = [
+                    base_dir / f if not f.is_absolute() else f for f in self.compose_files
+                ]
+        else:
+            compose_file_paths = os.environ.get("COMPOSE_FILE")
+            if compose_file_paths:
+                self.compose_files = []
+                for p in compose_file_paths.split(os.pathsep):
+                    p = p.strip()
+                    if not p:
+                        continue
+                    fp = Path(p)
+                    if base_dir and not fp.is_absolute():
+                        fp = base_dir / fp
+                    self.compose_files.append(fp)
+            else:
+                search_dir = str(base_dir) if base_dir else "."
+                cf = find_compose_file(search_dir)
+                if cf:
+                    self.compose_files = [cf]
+
+        if not self.compose_files:
+            log_error(f"Compose file not found. Supported filenames: {', '.join(COMPOSE_FILES)}")
+            sys.exit(1)
+
+        missing = [str(f) for f in self.compose_files if not f.exists()]
+        if missing:
+            log_error(f"Compose file(s) not found: {', '.join(missing)}")
+            sys.exit(1)
+
+        self.config = ComposeConfig(self.compose_files, project_name, profiles=profiles,
+                                    env_overrides=env_files, project_directory=project_directory)
         self.state = StateManager(self.config.project_dir, self.config.project_name)
         self.network = NetworkManager(self.state, self.config)
         self.volumes = VolumeManager(self.state, self.config)
@@ -1087,7 +1286,9 @@ class UdockerCompose:
                 sys.exit(1)
         return names
 
-    def cmd_up(self, services=None, detach=False, no_recreate=False):
+    def cmd_up(self, services=None, detach=False, no_recreate=False,
+                remove_orphans=False, abort_on_container_exit=False, exit_code_from=None,
+                no_deps=False):
         """Start services (equivalent to docker-compose up)"""
         self.state.init()
 
@@ -1102,21 +1303,31 @@ class UdockerCompose:
         # Filter by topological order
         order = [s for s in order if s in targets]
 
-        # Also include dependent services
-        all_needed = set()
-        def collect_deps(name):
-            all_needed.add(name)
-            for dep in self.config.services[name]["depends_on"]:
-                collect_deps(dep)
-        for s in targets:
-            collect_deps(s)
+        # Also include dependent services unless --no-deps
+        if no_deps:
+            all_needed = set(targets)
+            order = [s for s in order if s in all_needed]
+        else:
+            all_needed = set()
+            def collect_deps(name):
+                all_needed.add(name)
+                for dep in self.config.get_depends_on_names(name):
+                    collect_deps(dep)
+            for s in targets:
+                collect_deps(s)
+            order = [s for s in self.config.get_startup_order() if s in all_needed]
 
-        order = [s for s in self.config.get_startup_order() if s in all_needed]
+        # Remove services that are running but no longer in compose
+        if remove_orphans:
+            self._remove_orphans()
 
         log_info(f"Startup order: {' -> '.join(order)}")
         print()
 
         for name in order:
+            # Wait for dependency conditions before starting this service
+            self._wait_for_dependency_conditions(name)
+
             # Pull image (if not available locally)
             svc = self.config.services[name]
             if svc["build"]:
@@ -1172,19 +1383,77 @@ class UdockerCompose:
                     log_info(f"  {name}: http://localhost:{port['host']}")
 
             log_info("Press Ctrl+C to stop all services")
+            exit_code = 0
             try:
-                while not self._shutdown_requested:
-                    time.sleep(1)
+                exit_code = self._wait_for_services(
+                    order,
+                    abort_on_container_exit=abort_on_container_exit,
+                    exit_code_from=exit_code_from,
+                )
             except KeyboardInterrupt:
                 pass
             finally:
                 self.supervisor.stop()
                 self.cmd_down()
+            if exit_code_from:
+                sys.exit(exit_code)
         else:
             # Single service foreground mode
-            self.svc_mgr.start(order[0], detach=False)
+            if exit_code_from and exit_code_from != order[0]:
+                log_warn(f"--exit-code-from service '{exit_code_from}' is not in the selected services")
+            r = self.svc_mgr.start(order[0], detach=False)
+            if exit_code_from == order[0]:
+                # Try to obtain the exit code from the state
+                last_exit = self.state.get_last_exit_code(order[0])
+                if not r and last_exit == 0:
+                    sys.exit(1)
+                sys.exit(last_exit)
 
-    def cmd_down(self, remove_volumes=False, services=None, stop_daemon=True):
+    def _remove_orphans(self):
+        """Remove containers that are running but not in the current compose file."""
+        known = set(self.config.services.keys())
+        for state_name in list(self.state.get_all_states().keys()):
+            if state_name not in known:
+                pid = self.state.get_pid(state_name)
+                if pid:
+                    log_info(f"Removing orphan service: {state_name}")
+                    self.svc_mgr.remove(state_name)
+
+    def _wait_for_dependency_conditions(self, service_name):
+        """Wait for dependency conditions (service_healthy) before starting a service."""
+        for dep in self.config.get_depends_on(service_name):
+            dep_name = dep["name"]
+            condition = dep.get("condition", "service_started")
+            if condition == "service_started":
+                continue
+            if condition == "service_healthy":
+                log_info(f"Waiting for {dep_name} to be healthy before starting {service_name}")
+                self.svc_mgr.check_health(dep_name)
+            elif condition == "service_completed_successfully":
+                # We don't have a reliable way to track one-shot completion in daemon mode;
+                # log that we are ignoring it.
+                log_warn(f"depends_on condition 'service_completed_successfully' for '{dep_name}' is not supported")
+
+    def _wait_for_services(self, services, abort_on_container_exit=False, exit_code_from=None):
+        """Wait in foreground while services run. Returns exit code if requested."""
+        tracked = set(services)
+        while not self._shutdown_requested:
+            time.sleep(1)
+            exited = []
+            for name in tracked:
+                if self.state.get_pid(name) is None:
+                    svc_state = self.state.get_service_state(name)
+                    if svc_state.get("status") == "running":
+                        exited.append(name)
+            if exited:
+                if abort_on_container_exit:
+                    log_info(f"Service(s) exited: {', '.join(exited)}; stopping all services")
+                    self._shutdown_requested = True
+                if exit_code_from and exit_code_from in exited:
+                    return self.state.get_last_exit_code(exit_code_from)
+        return 0
+
+    def cmd_down(self, remove_volumes=False, services=None, stop_daemon=True, remove_images=False):
         """Stop and remove all services"""
         if stop_daemon:
             daemon_pid = self.state.get_compose_pid()
@@ -1216,6 +1485,15 @@ class UdockerCompose:
                     shutil.rmtree(vol_path, ignore_errors=True)
                     log_info(f"  Removed: {vol_name}")
 
+        if remove_images:
+            log_info("Removing images...")
+            seen = set()
+            for name in order:
+                image = self.config.services[name]["image"]
+                if image and image not in seen:
+                    seen.add(image)
+                    udocker("rmi", "-f", image, check=False)
+
         self.state.clear_compose_pid()
         log_info("All services stopped and cleaned up")
 
@@ -1245,19 +1523,29 @@ class UdockerCompose:
             padding = " " * (25 - visible_len)
             print(f"{name:<20} {container:<30} {status_colored}{padding} {ports}")
 
-    def cmd_pull(self, services=None):
+    def cmd_pull(self, services=None, ignore_failures=False):
         """Pull all images"""
         names = self._filter_services(services)
+        failed = []
         for name in names:
-            self.svc_mgr.pull(name)
+            if not self.svc_mgr.pull(name, ignore_failures=ignore_failures):
+                failed.append(name)
+        if failed and not ignore_failures:
+            sys.exit(1)
 
-    def cmd_logs(self, services=None, follow=False, tail=50):
+    def cmd_logs(self, services=None, follow=False, tail=50, timestamps=False):
         """View logs"""
         self.state.init()
         names = self._filter_services(services)
 
+        def format_line(name, line):
+            if timestamps:
+                ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+                return f"{ts} {name} {line}"
+            return line
+
         if follow:
-            # Follow multiple log files with tail -f
+            # Follow multiple log files with tail -f (tail itself handles prefixes)
             log_files = []
             for name in names:
                 log_path = self.state.get_log_path(name)
@@ -1278,7 +1566,7 @@ class UdockerCompose:
                     print(f"\033[36m=== {name} ===\033[0m")
                     lines = log_path.read_text().splitlines()
                     for line in lines[-tail:]:
-                        print(line)
+                        print(format_line(name, line))
                     print()
                 else:
                     log_warn(f"Service '{name}' has no logs")
@@ -1297,11 +1585,22 @@ class UdockerCompose:
         for name in reversed(names):
             self.svc_mgr.stop(name)
 
-    def cmd_start(self, services=None):
+    def cmd_start(self, services=None, no_deps=False):
         """Start stopped services"""
         self.state.init()
         self.network.generate_hosts_file()
-        names = self._filter_services(services)
+        targets = self._filter_services(services)
+        if not no_deps:
+            all_needed = set()
+            def collect_deps(name):
+                all_needed.add(name)
+                for dep in self.config.get_depends_on_names(name):
+                    collect_deps(dep)
+            for s in targets:
+                collect_deps(s)
+            names = [s for s in self.config.get_startup_order() if s in all_needed]
+        else:
+            names = targets
         for name in names:
             svc = self.config.services[name]
             # Create container if it does not exist yet
@@ -1359,10 +1658,237 @@ class UdockerCompose:
             if rm:
                 udocker("rm", "-f", tmp_name, check=False)
 
-    def cmd_config(self):
+    def cmd_kill(self, services=None, signal_name="SIGKILL"):
+        """Send a signal to running services"""
+        names = self._filter_services(services) if services else self.config.get_service_names()
+        sig = ServiceManager._signal_name_to_number(signal_name)
+        for name in names:
+            pid = self.state.get_pid(name)
+            if pid:
+                log_info(f"Sending {signal_name} to {name} (PID: {pid})")
+                try:
+                    os.killpg(os.getpgid(pid), sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            else:
+                log_warn(f"Service '{name}' is not running")
+
+    def cmd_top(self, services=None):
+        """Show processes for running services"""
+        names = self._filter_services(services) if services else self.config.get_service_names()
+        for name in names:
+            pid = self.state.get_pid(name)
+            if not pid:
+                log_warn(f"Service '{name}' is not running")
+                continue
+            print(f"\033[36m=== {self.config.services[name]['container_name']} (PID {pid}) ===\033[0m")
+            try:
+                subprocess.run(["ps", "-f", "--ppid", str(pid), "-p", str(pid)])
+            except FileNotFoundError:
+                log_warn("'ps' command not available")
+            print()
+
+    def cmd_images(self):
+        """List images used by services"""
+        seen = set()
+        print(f"{'REPOSITORY':<40} {'TAG':<15}")
+        for name in self.config.get_startup_order():
+            image = self.config.services[name]["image"]
+            if not image or image in seen:
+                continue
+            seen.add(image)
+            if ":" in image:
+                repo, tag = image.rsplit(":", 1)
+            else:
+                repo, tag = image, "latest"
+            print(f"{repo:<40} {tag:<15}")
+
+    def cmd_port(self, service_name, private_port=None):
+        """Show port mappings for a service"""
+        if service_name not in self.config.services:
+            log_error(f"Unknown service: '{service_name}'")
+            sys.exit(1)
+        svc = self.config.services[service_name]
+        for p in svc["ports"]:
+            if private_port and str(private_port) != p["container"]:
+                continue
+            print(f"{p['host']}->{p['container']}/{p['protocol']}")
+
+    def cmd_cp(self, source, destination):
+        """Copy files between host and containers (host path <-> container:path).
+
+        Supports:
+          udocker-compose cp HOST_PATH CONTAINER:PATH
+          udocker-compose cp CONTAINER:PATH HOST_PATH
+        """
+        def split_path(spec):
+            if ":" in spec:
+                svc_or_container, path = spec.split(":", 1)
+                return svc_or_container, path
+            return None, spec
+
+        src_service, src_path = split_path(source)
+        dst_service, dst_path = split_path(destination)
+
+        if src_service and dst_service:
+            log_error("Copying between two containers is not supported")
+            sys.exit(1)
+        if not src_service and not dst_service:
+            log_error("At least one path must be inside a container (use SERVICE:PATH)")
+            sys.exit(1)
+
+        if src_service:
+            service_name = src_service
+            direction = "from"
+        else:
+            service_name = dst_service
+            direction = "to"
+
+        if service_name not in self.config.services:
+            log_error(f"Unknown service: '{service_name}'")
+            sys.exit(1)
+
+        container_name = self.config.services[service_name]["container_name"]
+
+        # Get container rootfs path via udocker inspect
+        r = udocker("inspect", "-p", container_name, capture=True, check=False)
+        if r.returncode != 0 or not r.stdout.strip():
+            log_error(f"Container '{container_name}' not found")
+            sys.exit(1)
+        rootfs = Path(r.stdout.strip())
+
+        if direction == "from":
+            src = rootfs / src_path.lstrip("/")
+            dst = Path(dst_path)
+            if not src.exists():
+                log_error(f"Source path not found in container: {source}")
+                sys.exit(1)
+            if src.is_dir():
+                shutil.copytree(src, dst / src.name if dst.is_dir() else dst, dirs_exist_ok=True)
+            else:
+                if dst.is_dir():
+                    dst = dst / src.name
+                shutil.copy2(src, dst)
+            log_info(f"Copied {source} -> {destination}")
+        else:
+            src = Path(src_path)
+            dst = rootfs / dst_path.lstrip("/")
+            if not src.exists():
+                log_error(f"Source path not found: {source}")
+                sys.exit(1)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+            log_info(f"Copied {source} -> {destination}")
+
+    def cmd_rm(self, services=None, stop=False, force=False, volumes=False):
+        """Remove stopped service containers."""
+        names = self._filter_services(services) if services else self.config.get_service_names()
+        for name in names:
+            pid = self.state.get_pid(name)
+            if pid and not stop and not force:
+                log_warn(f"Service '{name}' is running; use --stop or --force to remove")
+                continue
+            if pid and (stop or force):
+                self.svc_mgr.stop(name)
+            svc = self.config.services[name]
+            container_name = svc["container_name"]
+            log_info(f"Removing container: {container_name}")
+            rm_args = ["-f", container_name] if force else [container_name]
+            udocker("rm", *rm_args, check=False)
+            self.state.remove_service_state(name)
+        if volumes:
+            log_info("Removing named volumes...")
+            for vol_name in self.config.volumes:
+                vol_path = self.state.get_volume_path(vol_name)
+                if vol_path.exists():
+                    shutil.rmtree(vol_path, ignore_errors=True)
+                    log_info(f"  Removed: {vol_name}")
+
+    def cmd_create(self, services=None):
+        """Create containers without starting them."""
+        self.state.init()
+        self.network.generate_hosts_file()
+        self.volumes.ensure_volumes()
+        names = self._filter_services(services)
+        for name in names:
+            svc = self.config.services[name]
+            if svc["build"] and not svc["image"]:
+                log_warn(f"Service '{name}' uses build directive without image — skipping")
+                continue
+            self.svc_mgr.create(name, force=False)
+            self.network.inject_hosts_to_container(svc["container_name"])
+            self.state.set_service_state(name, status="created")
+            log_info(f"Created container: {svc['container_name']}")
+
+    def cmd_pause(self, services=None):
+        """Pause running services by sending SIGSTOP."""
+        names = self._filter_services(services) if services else self.config.get_service_names()
+        for name in names:
+            pid = self.state.get_pid(name)
+            if pid:
+                log_info(f"Pausing service: {name}")
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGSTOP)
+                    self.state.set_service_state(name, status="paused")
+                except (ProcessLookupError, PermissionError):
+                    log_warn(f"Failed to pause {name}")
+            else:
+                log_warn(f"Service '{name}' is not running")
+
+    def cmd_unpause(self, services=None):
+        """Unpause services by sending SIGCONT."""
+        names = self._filter_services(services) if services else self.config.get_service_names()
+        for name in names:
+            pid = self.state.get_pid(name)
+            if pid:
+                log_info(f"Unpausing service: {name}")
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGCONT)
+                    self.state.set_service_state(name, status="running")
+                except (ProcessLookupError, PermissionError):
+                    log_warn(f"Failed to unpause {name}")
+            else:
+                log_warn(f"Service '{name}' is not running")
+
+    def cmd_events(self, services=None):
+        """Stream service state change events (simulated)."""
+        self.state.init()
+        names = set(self._filter_services(services) if services else self.config.get_service_names())
+        last_states = {}
+        print(f"{'TIMESTAMP':<25} {'SERVICE':<20} {'EVENT'}")
+        try:
+            while True:
+                for name in names:
+                    state = self.state.get_service_state(name)
+                    status = state.get("status", "not created")
+                    pid = self.state.get_pid(name)
+                    if pid:
+                        status = "running"
+                    key = (name, status)
+                    if key != last_states.get(name):
+                        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"{ts:<25} {name:<20} {status}")
+                        last_states[name] = key
+                time.sleep(2)
+        except KeyboardInterrupt:
+            print()
+
+    def cmd_config(self, services_only=False, volumes_only=False):
         """Validate and display configuration"""
+        if services_only:
+            for name in self.config.get_startup_order():
+                print(name)
+            return
+        if volumes_only:
+            for name in self.config.volumes:
+                print(name)
+            return
+
         print(f"Project: {self.config.project_name}")
-        print(f"Compose file: {self.config.filepath}")
+        print(f"Compose file(s): {', '.join(str(f) for f in self.config.filepaths)}")
         print(f"Exec mode: {EXEC_MODE}")
         print()
 
@@ -1381,12 +1907,15 @@ class UdockerCompose:
             if svc["ports"]:
                 ports = ", ".join(f"{p['host']}:{p['container']}" for p in svc["ports"])
                 print(f"    ports: {ports}")
+            if svc["expose"]:
+                print(f"    expose: {', '.join(str(p) for p in svc['expose'])}")
             if svc["volumes"]:
                 for v in svc["volumes"]:
                     src = v["host"] or "(anonymous)"
                     print(f"    volume: {src} -> {v['container']}")
             if svc["depends_on"]:
-                print(f"    depends_on: {', '.join(svc['depends_on'])}")
+                deps = [f"{d['name']} ({d.get('condition', 'service_started')})" for d in svc["depends_on"]]
+                print(f"    depends_on: {', '.join(deps)}")
             if svc["environment"]:
                 print(f"    env: {len(svc['environment'])} vars")
             print(f"    restart: {svc['restart']}")
@@ -1425,10 +1954,13 @@ def build_parser():
             Examples:
               udocker-compose up -d                     # Start all services in background
               udocker-compose up redis postgres          # Start specific services only
+              udocker-compose up --exit-code-from test   # Run and exit with test service code
               udocker-compose down -v                    # Stop and remove volumes
               udocker-compose logs -f new-api            # Follow logs
               udocker-compose exec new-api sh            # Execute shell in container
               udocker-compose config                     # Show parsed configuration
+              udocker-compose kill -s SIGTERM web        # Send signal to service
+              udocker-compose port web 80               # Show port mapping
 
             Limitations:
               - No docker build support (use save/load for images)
@@ -1438,8 +1970,13 @@ def build_parser():
         """),
     )
 
-    parser.add_argument("-f", "--file", help="Compose file path")
+    parser.add_argument("-f", "--file", action="append", help="Compose file path (can be given multiple times)")
     parser.add_argument("-p", "--project-name", help="Project name")
+    parser.add_argument("--project-directory", help="Project working directory")
+    parser.add_argument("--env-file", action="append", help="Path to env file (can be given multiple times)")
+    parser.add_argument("--profile", action="append", help="Enable profile (can be given multiple times)")
+    parser.add_argument("--ansi", choices=["auto", "never", "always"], default="auto",
+                        help="Control ANSI output (default: auto)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sub = parser.add_subparsers(dest="command", help="Subcommands")
@@ -1448,25 +1985,33 @@ def build_parser():
     p_up = sub.add_parser("up", help="Create and start services")
     p_up.add_argument("-d", "--detach", action="store_true", help="Run in background")
     p_up.add_argument("--no-recreate", action="store_true", help="Do not recreate existing containers")
+    p_up.add_argument("--no-deps", action="store_true", help="Do not start linked services")
+    p_up.add_argument("--remove-orphans", action="store_true", help="Remove containers not defined in compose file")
+    p_up.add_argument("--abort-on-container-exit", action="store_true", help="Stop all services if any container exits")
+    p_up.add_argument("--exit-code-from", metavar="SERVICE", help="Return the exit code of the selected service")
     p_up.add_argument("services", nargs="*", help="Service names")
 
     # down
     p_down = sub.add_parser("down", help="Stop and remove services")
     p_down.add_argument("-v", "--volumes", action="store_true", help="Also remove named volumes")
+    p_down.add_argument("--rmi", action="store_true", help="Also remove images")
     p_down.add_argument("services", nargs="*", help="Service names")
 
     # ps
     p_ps = sub.add_parser("ps", help="List service status")
+    p_ps.add_argument("-a", "--all", action="store_true", help="Show all services (default behavior)")
     p_ps.add_argument("services", nargs="*")
 
     # pull
     p_pull = sub.add_parser("pull", help="Pull images")
+    p_pull.add_argument("--ignore-pull-failures", action="store_true", help="Ignore failing pulls")
     p_pull.add_argument("services", nargs="*")
 
     # logs
     p_logs = sub.add_parser("logs", help="View logs")
     p_logs.add_argument("-f", "--follow", action="store_true", help="Follow log output")
     p_logs.add_argument("-n", "--tail", type=int, default=50, help="Number of lines to show")
+    p_logs.add_argument("-t", "--timestamps", action="store_true", help="Show timestamps")
     p_logs.add_argument("services", nargs="*")
 
     # restart
@@ -1479,6 +2024,7 @@ def build_parser():
 
     # start
     p_start = sub.add_parser("start", help="Start stopped services")
+    p_start.add_argument("--no-deps", action="store_true", help="Do not start linked services")
     p_start.add_argument("services", nargs="*")
 
     # exec
@@ -1492,8 +2038,55 @@ def build_parser():
     p_run.add_argument("service", help="Service name")
     p_run.add_argument("run_command", nargs=argparse.REMAINDER, help="Command to run")
 
+    # kill
+    p_kill = sub.add_parser("kill", help="Send a signal to services")
+    p_kill.add_argument("-s", "--signal", default="SIGKILL", help="Signal to send (default: SIGKILL)")
+    p_kill.add_argument("services", nargs="*")
+
+    # top
+    p_top = sub.add_parser("top", help="Show running processes")
+    p_top.add_argument("services", nargs="*")
+
+    # images
+    sub.add_parser("images", help="List images used by services")
+
+    # port
+    p_port = sub.add_parser("port", help="Show port mappings")
+    p_port.add_argument("service", help="Service name")
+    p_port.add_argument("private_port", nargs="?", help="Container port to filter")
+
+    # cp
+    p_cp = sub.add_parser("cp", help="Copy files between host and container")
+    p_cp.add_argument("source", help="Source path (HOST_PATH or SERVICE:PATH)")
+    p_cp.add_argument("destination", help="Destination path (HOST_PATH or SERVICE:PATH)")
+
+    # rm
+    p_rm = sub.add_parser("rm", help="Remove stopped containers")
+    p_rm.add_argument("-s", "--stop", action="store_true", help="Stop containers before removing")
+    p_rm.add_argument("-f", "--force", action="store_true", help="Force removal")
+    p_rm.add_argument("-v", "--volumes", action="store_true", help="Also remove named volumes")
+    p_rm.add_argument("services", nargs="*", help="Service names")
+
+    # create
+    p_create = sub.add_parser("create", help="Create containers without starting")
+    p_create.add_argument("services", nargs="*", help="Service names")
+
+    # pause
+    p_pause = sub.add_parser("pause", help="Pause services")
+    p_pause.add_argument("services", nargs="*", help="Service names")
+
+    # unpause
+    p_unpause = sub.add_parser("unpause", help="Unpause services")
+    p_unpause.add_argument("services", nargs="*", help="Service names")
+
+    # events
+    p_events = sub.add_parser("events", help="Stream service state events")
+    p_events.add_argument("services", nargs="*", help="Service names")
+
     # config
-    sub.add_parser("config", help="Show parsed configuration")
+    p_config = sub.add_parser("config", help="Show parsed configuration")
+    p_config.add_argument("--services", action="store_true", help="List service names only")
+    p_config.add_argument("--volumes", action="store_true", help="List volume names only")
 
     return parser
 
@@ -1506,6 +2099,16 @@ def main():
         parser.print_help()
         sys.exit(0)
 
+    # Apply --ansi option globally
+    global NO_COLOR
+    if args.ansi == "never":
+        NO_COLOR = True
+    elif args.ansi == "always":
+        NO_COLOR = False
+    else:
+        # auto: respect existing NO_COLOR env unless explicitly overridden
+        NO_COLOR = os.environ.get("NO_COLOR", "").lower() in ("1", "true", "yes")
+
     # Signal handling — don't register SIGINT here, let KeyboardInterrupt propagate
     def sigterm_handler(sig, frame):
         print()
@@ -1513,8 +2116,15 @@ def main():
         sys.exit(143)
     signal.signal(signal.SIGTERM, sigterm_handler)
 
+    # Aggregate profiles from env + CLI
+    profiles = list(args.profile) if args.profile else []
+    if os.environ.get("COMPOSE_PROFILES"):
+        profiles.extend(p.strip() for p in os.environ["COMPOSE_PROFILES"].split(",") if p.strip())
+
     try:
-        uc = UdockerCompose(compose_file=args.file, project_name=args.project_name)
+        uc = UdockerCompose(compose_files=args.file, project_name=args.project_name,
+                            project_directory=args.project_directory,
+                            profiles=profiles or None, env_files=args.env_file)
     except FileNotFoundError as e:
         log_error(str(e))
         sys.exit(1)
@@ -1527,31 +2137,58 @@ def main():
     if cmd == "up":
         uc.cmd_up(services=args.services or None,
                    detach=args.detach,
-                   no_recreate=args.no_recreate)
+                   no_recreate=args.no_recreate,
+                   no_deps=args.no_deps,
+                   remove_orphans=args.remove_orphans,
+                   abort_on_container_exit=args.abort_on_container_exit,
+                   exit_code_from=args.exit_code_from)
     elif cmd == "down":
         uc.cmd_down(remove_volumes=args.volumes,
-                    services=args.services or None)
+                    services=args.services or None,
+                    remove_images=args.rmi)
     elif cmd == "ps":
         uc.cmd_ps(services=args.services or None)
     elif cmd == "pull":
-        uc.cmd_pull(services=args.services or None)
+        uc.cmd_pull(services=args.services or None,
+                    ignore_failures=args.ignore_pull_failures)
     elif cmd == "logs":
         uc.cmd_logs(services=args.services or None,
-                    follow=args.follow, tail=args.tail)
+                    follow=args.follow, tail=args.tail, timestamps=args.timestamps)
     elif cmd == "restart":
         uc.cmd_restart(services=args.services or None)
     elif cmd == "stop":
         uc.cmd_stop(services=args.services or None)
     elif cmd == "start":
-        uc.cmd_start(services=args.services or None)
+        uc.cmd_start(services=args.services or None, no_deps=args.no_deps)
     elif cmd == "exec":
         code = uc.cmd_exec(args.service, args.exec_command)
         sys.exit(code)
     elif cmd == "run":
         code = uc.cmd_run(args.service, args.run_command, rm=args.rm)
         sys.exit(code)
+    elif cmd == "kill":
+        uc.cmd_kill(services=args.services or None, signal_name=args.signal)
+    elif cmd == "top":
+        uc.cmd_top(services=args.services or None)
+    elif cmd == "images":
+        uc.cmd_images()
+    elif cmd == "port":
+        uc.cmd_port(args.service, args.private_port)
+    elif cmd == "cp":
+        uc.cmd_cp(args.source, args.destination)
+    elif cmd == "rm":
+        uc.cmd_rm(services=args.services or None,
+                  stop=args.stop, force=args.force, volumes=args.volumes)
+    elif cmd == "create":
+        uc.cmd_create(services=args.services or None)
+    elif cmd == "pause":
+        uc.cmd_pause(services=args.services or None)
+    elif cmd == "unpause":
+        uc.cmd_unpause(services=args.services or None)
+    elif cmd == "events":
+        uc.cmd_events(services=args.services or None)
     elif cmd == "config":
-        uc.cmd_config()
+        uc.cmd_config(services_only=args.services, volumes_only=args.volumes)
     else:
         parser.print_help()
         sys.exit(1)
