@@ -22,7 +22,21 @@ Install the only Python dependency used by the script:
 python3 -m pip install pyyaml
 ```
 
-`udocker` must also be installed and available on `PATH`, unless `UDOCKER_COMPOSE_UDOCKER` points to it explicitly.
+`udocker` must also be installed and available on `PATH`, unless `UDOCKER_COMPOSE_UDOCKER` points to it explicitly. The latest stable udocker release is 1.3.17. Installation options include:
+
+```bash
+# Release tarball
+wget https://github.com/indigo-dc/udocker/releases/download/1.3.17/udocker-1.3.17.tar.gz
+tar zxvf udocker-1.3.17.tar.gz
+export PATH=$(pwd)/udocker-1.3.17/udocker:$PATH
+udocker install
+
+# PyPI
+pip install udocker
+udocker install
+```
+
+Official docs: https://indigo-dc.github.io/udocker/
 
 ## CLI usage during development
 
@@ -94,13 +108,14 @@ python3 ./udocker-compose -f /path/to/docker-compose.yml exec SERVICE_NAME COMMA
 
 ## Testing / validation
 
-The repository now has a small automated test suite focused on compose parsing, normalization, and command tokenization behavior.
+The repository now has a small automated test suite focused on compose parsing, normalization, command tokenization, CLI flags, and color output behavior.
 
 Use these commands for validation:
 - `python3 -m py_compile ./udocker-compose` for syntax checking
-- `python3 -m unittest tests.test_compose_config tests.test_command_parsing -v` for automated regression coverage
+- `python3 -m unittest tests.test_compose_config tests.test_command_parsing tests.test_cli -v` for automated regression coverage
 - `python3 ./udocker-compose --help` for parser/entrypoint validation
-- `python3 ./udocker-compose -f /path/to/docker-compose.yml config` to verify compose parsing and startup order
+- `python3 ./udocker-compose --version` for version output validation
+- `python3 ./udocker-compose -f /path/to/docker-compose.yml config` to verify compose parsing, variable interpolation, and startup order
 - `python3 ./udocker-compose -f /path/to/docker-compose.yml up SERVICE_NAME` when validating behavior for a single service path
 
 If you add more tests later, keep this section updated with the exact commands for running the full suite and targeted subsets.
@@ -113,6 +128,7 @@ The CLI behavior is controlled by these environment variables:
 UDOCKER_COMPOSE_UDOCKER   # path to the udocker binary, default: udocker
 UDOCKER_COMPOSE_EXECMODE  # udocker exec mode, default: P1
 UDOCKER_COMPOSE_DEBUG=1   # enable debug logging
+NO_COLOR=1                # disable ANSI color output
 ```
 
 ## High-level architecture
@@ -123,8 +139,9 @@ The entire implementation lives in `udocker-compose`. The code is organized as a
 
 `ComposeConfig`:
 - locates and loads one compose file
+- loads a project-local `.env` file and interpolates `${VAR}` / `${VAR:-default}` / `$VAR` placeholders
 - normalizes service definitions into a predictable internal structure
-- resolves `environment`, `env_file`, `ports`, `volumes`, `depends_on`, and service naming
+- resolves `environment`, `env_file`, `ports` (including ranges), `volumes`, `depends_on`, and service naming
 - computes startup order with a topological sort based on `depends_on`
 
 This class is the source of truth for feature support and compatibility behavior.
@@ -132,13 +149,14 @@ This class is the source of truth for feature support and compatibility behavior
 ### 2. Per-project runtime state
 
 `StateManager` manages the `.udocker-compose/` directory created inside the target compose project directory. It persists:
-- `state.json` with service metadata/status
+- `state.json` with service metadata/status and last recorded exit codes
 - `pids/` for background process tracking
 - `logs/` for captured stdout/stderr
 - `network/hosts` for generated host aliases
 - `volumes/` for named-volume backing directories
+- `compose.pid` for the daemonized `up -d` process
 
-When debugging lifecycle issues, inspect this directory first.
+State file access is protected by a thread lock because the restart supervisor runs in a background thread. When debugging lifecycle issues, inspect this directory first.
 
 ### 3. Simulated networking
 
@@ -170,9 +188,9 @@ Important implementation detail: background services are not managed by a daemon
 
 ### 6. Restart supervision
 
-`RestartSupervisor` is an in-process background thread that periodically checks tracked PIDs and restarts services whose policy is `always` or `unless-stopped`.
+`RestartSupervisor` is an in-process background thread that periodically checks tracked PIDs and restarts services whose policy is `always`, `unless-stopped`, or `on-failure`.
 
-This means restart behavior only exists while the current `udocker-compose` process is alive in the mode that starts the supervisor.
+In foreground `up` mode, the supervisor lives inside the running `udocker-compose` process. In `up -d` mode, the CLI daemonizes into a background process (stored in `.udocker-compose/compose.pid`) so the supervisor and restart policies remain active after the shell prompt returns. Use `down` to stop the daemon.
 
 ### 7. Top-level orchestration
 
@@ -190,11 +208,13 @@ The most important orchestration flow is `cmd_up`:
 ## Important behavioral constraints
 
 - `build` is not supported at runtime; the script warns and expects images to be built elsewhere and imported into `udocker`.
-- Port publishing is only added for `P*` exec modes.
+- Port publishing is only added for `P*` exec modes. Port ranges are expanded into individual mappings.
 - Device mapping is only added for `R*` exec modes.
 - Host IP in `host_ip:host_port:container_port` port syntax is parsed but ignored; only host/container ports are used.
 - Command strings are tokenized with `shlex.split()`, so quoted string-form commands are preserved more accurately than a plain whitespace split. YAML list form is still the most exact representation.
 - Named volume detection is heuristic: non-absolute, non-relative, non-tilde mount sources are treated as candidate named volumes.
+- `shm_size`, `privileged`, `cap_add`, `tmpfs`, and `dns` are parsed but not supported; a warning is emitted for each.
+- `restart: on-failure` is supported by recording child exit codes when reaping exited processes.
 
 ## Files worth reading first
 

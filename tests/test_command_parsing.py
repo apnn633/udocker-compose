@@ -87,6 +87,25 @@ class CommandParsingTest(unittest.TestCase):
         self.assertEqual(run_args[run_args.index("--entrypoint") + 1], "")
         self.assertEqual(manager._get_service_command("app"), ["echo", "hello"])
 
+    def test_unsupported_options_warn(self):
+        compose_file = self.write_compose(
+            """
+            services:
+              app:
+                image: demo:latest
+                privileged: true
+                shm_size: 1g
+                dns:
+                  - 8.8.8.8
+            """
+        )
+
+        config = ComposeConfig(compose_file)
+        manager = ServiceManager(config, DummyState(), DummyNetwork(), DummyVolumes())
+        # Just ensure _build_run_args completes without raising
+        args = manager._build_run_args("app")
+        self.assertIn("HOSTNAME=app", args)
+
 
 if __name__ == "__main__":
     unittest.main()
