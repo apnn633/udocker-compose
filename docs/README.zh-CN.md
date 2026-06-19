@@ -30,17 +30,39 @@
 
 ### 安装
 
+**1. 安装 udocker**
+
+选择以下任一方式。最新稳定版为 **1.3.17**。
+
 ```bash
-# 1. 安装 udocker（如果尚未安装）
+# 方式 A：通过发布 tarball 安装（推荐）
+wget https://github.com/indigo-dc/udocker/releases/download/1.3.17/udocker-1.3.17.tar.gz
+tar zxvf udocker-1.3.17.tar.gz
+export PATH=$(pwd)/udocker-1.3.17/udocker:$PATH
+udocker install
+
+# 方式 B：通过 PyPI 安装
 pip install udocker
 udocker install
 
-# 2. 安装 udocker-compose
+# 方式 C：通过源码安装
+git clone --depth=1 https://github.com/indigo-dc/udocker.git
+(cd udocker/udocker && ln -s maincmd.py udocker)
+export PATH=$(pwd)/udocker/udocker:$PATH
+udocker install
+```
+
+**2. 安装 udocker-compose**
+
+```bash
 git clone https://github.com/apnn633/udocker-compose.git
 chmod +x udocker-compose/udocker-compose
 ln -s $(pwd)/udocker-compose/udocker-compose ~/.local/bin/udocker-compose
+```
 
-# 3. 安装依赖
+**3. 安装依赖**
+
+```bash
 pip install pyyaml
 ```
 
@@ -167,10 +189,12 @@ app        myproject_app       running (PID: 1236) 3000->3000/tcp
 
 | 模式 | 引擎 | 性能 | 适用场景 |
 |------|------|------|----------|
-| **P1**（默认） | PRoot + seccomp | 中 | 通用场景、Termux/Android |
-| **P2** | PRoot（无加速） | 低 | P1 不可用时的后备方案 |
-| **F1-F4** | Fakechroot | 高 | 对性能敏感的场景（不适用于 Termux） |
-| **R1-R3** | runc/crun | 高 | 支持 user namespace 的系统 |
+| **P1**（默认） | PRoot PTRACE + seccomp | 中 | 通用场景、Termux/Android |
+| **P2** | PRoot PTRACE（无加速） | 低 | P1 不可用时的后备方案 |
+| **F1-F4** | Fakechroot | 高 | 对性能敏感的场景（glibc/musl；不适用于 Termux） |
+| **R1** | runc/crun + user namespace | 高 | 支持非特权 user namespace 的系统 |
+| **R2** | runc/crun + P1 | 高 | 支持 user namespace 的系统 |
+| **R3** | runc/crun + P2 | 高 | 支持 user namespace 的系统，后备方案 |
 | **S1** | Singularity | 高 | HPC 集群 |
 
 ```bash
@@ -265,7 +289,14 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 
 - Python >= 3.7
 - [PyYAML](https://pypi.org/project/PyYAML/)
-- [udocker](https://github.com/indigo-dc/udocker) >= 1.3.0
+- [udocker](https://github.com/indigo-dc/udocker) >= 1.3.0（已在 1.3.17 上测试）
+
+官方 udocker 文档：
+
+- [udocker 文档](https://indigo-dc.github.io/udocker/)
+- [安装手册](https://indigo-dc.github.io/udocker/installation_manual.html)
+- [用户手册](https://indigo-dc.github.io/udocker/user_manual.html)
+- [速查卡](https://indigo-dc.github.io/udocker/reference_card.html)
 
 ## License
 

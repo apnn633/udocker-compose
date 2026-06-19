@@ -30,17 +30,39 @@ Docker Compose-compatible orchestration for [udocker](https://github.com/indigo-
 
 ### Installation
 
+**1. Install udocker**
+
+Choose one of the following methods. The latest stable release is **1.3.17**.
+
 ```bash
-# 1. Install udocker (if not already installed)
+# Option A: from the release tarball (recommended)
+wget https://github.com/indigo-dc/udocker/releases/download/1.3.17/udocker-1.3.17.tar.gz
+tar zxvf udocker-1.3.17.tar.gz
+export PATH=$(pwd)/udocker-1.3.17/udocker:$PATH
+udocker install
+
+# Option B: from PyPI
 pip install udocker
 udocker install
 
-# 2. Install udocker-compose
+# Option C: from the repository
+git clone --depth=1 https://github.com/indigo-dc/udocker.git
+(cd udocker/udocker && ln -s maincmd.py udocker)
+export PATH=$(pwd)/udocker/udocker:$PATH
+udocker install
+```
+
+**2. Install udocker-compose**
+
+```bash
 git clone https://github.com/apnn633/udocker-compose.git
 chmod +x udocker-compose/udocker-compose
 ln -s $(pwd)/udocker-compose/udocker-compose ~/.local/bin/udocker-compose
+```
 
-# 3. Install dependency
+**3. Install dependency**
+
+```bash
 pip install pyyaml
 ```
 
@@ -167,10 +189,12 @@ app        myproject_app       running (PID: 1236) 3000->3000/tcp
 
 | Mode | Engine | Performance | Best For |
 |------|--------|-------------|----------|
-| **P1** (default) | PRoot + seccomp | Medium | General use, Termux/Android |
-| **P2** | PRoot (no accel) | Low | Fallback when P1 fails |
-| **F1-F4** | Fakechroot | High | Performance-sensitive workloads (not Termux) |
-| **R1-R3** | runc/crun | High | Systems with user namespace support |
+| **P1** (default) | PRoot PTRACE + seccomp | Medium | General use, Termux/Android |
+| **P2** | PRoot PTRACE (no accel) | Low | Fallback when P1 fails |
+| **F1-F4** | Fakechroot | High | Performance-sensitive workloads (glibc/musl; not Termux) |
+| **R1** | runc/crun with user namespaces | High | Systems with unprivileged user namespaces |
+| **R2** | runc/crun + P1 | High | Systems with user namespaces |
+| **R3** | runc/crun + P2 | High | Systems with user namespaces, fallback |
 | **S1** | Singularity | High | HPC clusters |
 
 ```bash
@@ -265,7 +289,14 @@ UDOCKER_COMPOSE_EXECMODE=F1 udocker-compose up -d
 
 - Python >= 3.7
 - [PyYAML](https://pypi.org/project/PyYAML/)
-- [udocker](https://github.com/indigo-dc/udocker) >= 1.3.0
+- [udocker](https://github.com/indigo-dc/udocker) >= 1.3.0 (tested with 1.3.17)
+
+See the official udocker documentation for more details:
+
+- [udocker documentation](https://indigo-dc.github.io/udocker/)
+- [Installation manual](https://indigo-dc.github.io/udocker/installation_manual.html)
+- [User manual](https://indigo-dc.github.io/udocker/user_manual.html)
+- [Reference card](https://indigo-dc.github.io/udocker/reference_card.html)
 
 ## License
 

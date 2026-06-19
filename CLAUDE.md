@@ -22,7 +22,21 @@ Install the only Python dependency used by the script:
 python3 -m pip install pyyaml
 ```
 
-`udocker` must also be installed and available on `PATH`, unless `UDOCKER_COMPOSE_UDOCKER` points to it explicitly.
+`udocker` must also be installed and available on `PATH`, unless `UDOCKER_COMPOSE_UDOCKER` points to it explicitly. The latest stable udocker release is 1.3.17. Installation options include:
+
+```bash
+# Release tarball
+wget https://github.com/indigo-dc/udocker/releases/download/1.3.17/udocker-1.3.17.tar.gz
+tar zxvf udocker-1.3.17.tar.gz
+export PATH=$(pwd)/udocker-1.3.17/udocker:$PATH
+udocker install
+
+# PyPI
+pip install udocker
+udocker install
+```
+
+Official docs: https://indigo-dc.github.io/udocker/
 
 ## CLI usage during development
 
